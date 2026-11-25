@@ -39,3 +39,22 @@ export function appendAssistantOnce(conversations, conversationId, requestId, as
 export function isCurrentRequest(activeRequests, conversationId, requestId) {
   return activeRequests.get(conversationId) === requestId;
 }
+
+/** @param {string} conversationId @param {string} requestId @param {string} model */
+export function createRequestContext(conversationId, requestId, model) {
+  return Object.freeze({ conversationId, requestId, model });
+}
+
+/** @param {{scrollTop: number, scrollHeight: number, clientHeight: number}} element @param {number} [threshold] */
+export function captureScrollPosition(element, threshold = 96) {
+  return {
+    scrollTop: element.scrollTop,
+    followBottom: element.scrollHeight - element.clientHeight - element.scrollTop <= threshold,
+  };
+}
+
+/** @param {{scrollHeight: number, clientHeight: number}} element @param {{scrollTop: number, followBottom: boolean} | undefined} saved */
+export function restoreScrollTop(element, saved) {
+  if (!saved || saved.followBottom) return Math.max(0, element.scrollHeight - element.clientHeight);
+  return Math.max(0, Math.min(saved.scrollTop, element.scrollHeight - element.clientHeight));
+}

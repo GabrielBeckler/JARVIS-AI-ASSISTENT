@@ -1,7 +1,8 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { appendAssistantOnce, isCurrentRequest, restoreConversations, updateMessage, type StoredConversation } from "./chat.js";
+import { appendAssistantOnce, captureScrollPosition, createRequestContext, isCurrentRequest, restoreConversations, restoreScrollTop, updateMessage, type StoredConversation } from "./chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
+import { MarkdownMessage } from "./MarkdownMessage.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -83,6 +84,7 @@ function App() {
   const statusCheckRef = useRef(0);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const recent = conversations.filter((conversation) => conversation.messages.length > 0 && conversation.title.toLowerCase().includes(search.toLowerCase()));
   const activeRequestId = activeRequests[active.id];
@@ -113,8 +115,15 @@ function App() {
 
   useLayoutEffect(() => {
     const list = messageListRef.current;
-    if (list) list.scrollTop = list.scrollHeight;
+    if (!list) return;
+    list.scrollTop = restoreScrollTop(list, scrollPositionsRef.current.get(active.id));
+    scrollPositionsRef.current.set(active.id, captureScrollPosition(list));
   }, [activeId, active.messages.length, activeStream?.content]);
+
+  const rememberMessageScroll = () => {
+    const list = messageListRef.current;
+    if (list) scrollPositionsRef.current.set(active.id, captureScrollPosition(list));
+  };
 
   useLayoutEffect(() => {
     for (const [conversationId, stream] of Object.entries(streamingByConversation)) {
@@ -192,13 +201,13 @@ function App() {
     const content = retrying?.content ?? draft.trim();
     if (!content) return;
 
-    const conversationId = conversation.id;
-    const requestId = crypto.randomUUID();
-    const requestedModel = model;
+    const requestContext = createRequestContext(conversation.id, crypto.randomUUID(), model);
+    const { conversationId, requestId, model: requestedModel } = requestContext;
     const history = toChatContext(conversation.messages.filter((message) => message.id !== retrying?.id));
     const requestMessages = limitChatContext([...history, { role: "user" as const, content }]);
     const now = Date.now();
     const startedAt = performance.now();
+    scrollPositionsRef.current.set(conversationId, { scrollTop: 0, followBottom: true });
     const userMessage: Message = {
       ...(retrying ?? {}),
       id: retrying?.id ?? crypto.randomUUID(),
@@ -379,19 +388,19 @@ function App() {
               </div>
             </div>
           ) : (
-            <div className="message-list" ref={messageListRef}>
+            <div className="message-list" ref={messageListRef} onScroll={rememberMessageScroll}>
               <div className="conversation-date">MENSAGENS DA CONVERSA</div>
               {active.messages.map((message, index) => <article className={`message-row ${message.role} ${message.delivery === "failed" ? "failed" : ""}`} key={`${active.id}-${index}`}>
                 <div className={`message-avatar ${message.role}`}>{message.role === "user" ? "G" : <Icon name="spark" size={15} />}</div>
                 <div className="message-content">
                   <div className="message-author"><span className="message-author-name">{message.role === "user" ? "Você" : "Jarvis"}</span><span>{message.model ?? "Modelo desconhecido"} · {messageTime(message.createdAt)}</span></div>
-                  <p>{message.content}</p>
+                  {message.role === "assistant" ? <div className="assistant-markdown"><MarkdownMessage content={message.content} /></div> : <p>{message.content}</p>}
                   {message.delivery === "failed" && <div className="message-failure-label">{message.role === "assistant" ? "Resposta interrompida · não será enviada no próximo contexto" : "Envio falhou · pergunta preservada"}</div>}
                   {message.role === "assistant" && message.metrics && <div className="response-metrics">Primeiro texto: {durationLabel(message.metrics.firstContentMs)} · Total: {durationLabel(message.metrics.totalElapsedMs)} · Ollama: {durationLabel(message.metrics.ollamaTotalMs)} · Velocidade: {message.metrics.tokensPerSecond == null ? "N/D" : `${message.metrics.tokensPerSecond.toFixed(1)} tok/s`}</div>}
                   {message.role === "user" && message.delivery === "failed" && <button className="retry-message" onClick={() => void sendMessage(undefined, message.id)} disabled={Boolean(activeRequestId)}>Tentar novamente</button>}
                 </div>
               </article>)}
-              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Jarvis</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <p>{activeStream.content}</p> : <div className="typing-indicator"><i /><i /><i /></div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
+              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Jarvis</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : <div className="typing-indicator"><i /><i /><i /></div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
               <div className="message-end" />
             </div>
           )}

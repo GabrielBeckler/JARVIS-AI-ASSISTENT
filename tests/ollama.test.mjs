@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendAssistantOnce, isCurrentRequest, restoreConversations, updateMessage } from "../src/chat.js";
+import { appendAssistantOnce, captureScrollPosition, createRequestContext, isCurrentRequest, restoreConversations, restoreScrollTop, updateMessage } from "../src/chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext } from "../src/ollama.js";
 
 const emptyConversation = (id) => ({ id, title: "Nova conversa", updatedAt: 1, messages: [] });
@@ -100,4 +100,24 @@ test("keeps cancelled partial text incomplete and excludes it from future prompt
   const active = new Map([["cancelled", "req-1"]]);
   active.delete("cancelled");
   assert.equal(isCurrentRequest(active, "cancelled", "req-1"), false);
+});
+
+test("captures the selected model and source conversation for each in-flight request", () => {
+  const request = createRequestContext("conversation-a", "request-a", "model-v1");
+  const selectedModel = "model-v2";
+  const activeConversation = "conversation-b";
+  assert.equal(selectedModel, "model-v2");
+  assert.equal(activeConversation, "conversation-b");
+  assert.deepEqual(request, { conversationId: "conversation-a", requestId: "request-a", model: "model-v1" });
+  assert.equal(isCurrentRequest(new Map([[request.conversationId, request.requestId]]), request.conversationId, request.requestId), true);
+});
+
+test("follows the end only near it and restores an earlier reading position", () => {
+  const reading = captureScrollPosition({ scrollTop: 400, scrollHeight: 1200, clientHeight: 500 });
+  assert.deepEqual(reading, { scrollTop: 400, followBottom: false });
+  assert.equal(restoreScrollTop({ scrollHeight: 1600, clientHeight: 500 }, reading), 400);
+
+  const nearEnd = captureScrollPosition({ scrollTop: 650, scrollHeight: 1200, clientHeight: 500 });
+  assert.equal(nearEnd.followBottom, true);
+  assert.equal(restoreScrollTop({ scrollHeight: 1600, clientHeight: 500 }, nearEnd), 1100);
 });
