@@ -1,5 +1,5 @@
-/** @typedef {{ role: "user" | "assistant", content: string }} OllamaMessage */
-/** @typedef {OllamaMessage & { id?: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed" }} StoredMessage */
+/** @typedef {{ role: "system" | "user" | "assistant", content: string }} OllamaMessage */
+/** @typedef {OllamaMessage & { id?: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed", metrics?: {firstContentMs: number|null, totalElapsedMs: number|null, ollamaTotalMs: number|null, tokensPerSecond: number|null} }} StoredMessage */
 /** @typedef {{ name?: string, model?: string | null }} OllamaModel */
 
 /** @param {readonly OllamaModel[]} models @param {string} requestedModel */
@@ -16,6 +16,34 @@ export function toChatContext(messages) {
   return messages
     .filter((message) => message.delivery !== "failed" && message.delivery !== "pending")
     .map(({ role, content }) => ({ role, content }));
+}
+
+/**
+ * Keep system instructions and the newest contiguous whole turns. The character
+ * budget is a conservative payload bound, not a tokenizer or a model token limit.
+ * @param {readonly OllamaMessage[]} messages
+ * @param {number} [maxChars]
+ * @returns {OllamaMessage[]}
+ */
+export function limitChatContext(messages, maxChars = 10000) {
+  const system = messages.filter((message) => message.role === "system");
+  const turns = [];
+  for (const message of messages) {
+    if (message.role === "system") continue;
+    if (message.role === "user" || turns.length === 0) turns.push([]);
+    turns[turns.length - 1].push(message);
+  }
+
+  const countChars = (turn) => turn.reduce((total, message) => total + [...message.content].length, 0);
+  let used = system.reduce((total, message) => total + [...message.content].length, 0);
+  const kept = [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const size = countChars(turns[index]);
+    if (kept.length && used + size > maxChars) break;
+    kept.unshift(turns[index]);
+    used += size;
+  }
+  return [...system, ...kept.flat()];
 }
 
 /** @param {string} prompt @param {boolean} [hasHistory] */

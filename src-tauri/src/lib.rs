@@ -1,7 +1,24 @@
 mod ollama;
 
 use serde::Serialize;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Mutex, OnceLock},
+};
 use tauri::ipc::Channel;
+use tokio_util::sync::CancellationToken;
+
+#[derive(Default)]
+struct ChatCancellationRegistry {
+    active: HashMap<String, CancellationToken>,
+    cancelled_before_start: HashSet<String>,
+}
+
+static CHAT_CANCELLATIONS: OnceLock<Mutex<ChatCancellationRegistry>> = OnceLock::new();
+
+fn chat_cancellations() -> &'static Mutex<ChatCancellationRegistry> {
+    CHAT_CANCELLATIONS.get_or_init(|| Mutex::new(ChatCancellationRegistry::default()))
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -23,18 +40,63 @@ struct ChatStreamEvent {
 
 #[tauri::command]
 async fn ollama_chat(
+    request_id: String,
     base_url: String,
     model: String,
     messages: Vec<ollama::ChatMessage>,
     think: Option<bool>,
+    keep_alive: Option<String>,
     on_event: Channel<ChatStreamEvent>,
 ) -> Result<ollama::ChatCompletion, ollama::OllamaError> {
-    ollama::chat(&base_url, &model, &messages, think, |content| {
-        on_event
-            .send(ChatStreamEvent { content })
-            .map_err(|_| ollama::OllamaError::channel_closed())
-    })
-    .await
+    let cancellation = CancellationToken::new();
+    {
+        let mut registry = chat_cancellations()
+            .lock()
+            .expect("chat cancellation registry poisoned");
+        if registry.cancelled_before_start.remove(&request_id) {
+            cancellation.cancel();
+        }
+        registry
+            .active
+            .insert(request_id.clone(), cancellation.clone());
+    }
+    let result = ollama::chat(
+        &base_url,
+        &model,
+        &messages,
+        think,
+        keep_alive.as_deref(),
+        cancellation,
+        |content| {
+            on_event
+                .send(ChatStreamEvent { content })
+                .map_err(|_| ollama::OllamaError::channel_closed())
+        },
+    )
+    .await;
+    chat_cancellations()
+        .lock()
+        .expect("chat cancellation registry poisoned")
+        .active
+        .remove(&request_id);
+    result
+}
+
+#[tauri::command]
+fn ollama_cancel_chat(request_id: String) -> bool {
+    let mut registry = chat_cancellations()
+        .lock()
+        .expect("chat cancellation registry poisoned");
+    if let Some(cancellation) = registry.active.get(&request_id).cloned() {
+        cancellation.cancel();
+        true
+    } else {
+        if registry.cancelled_before_start.len() >= 256 {
+            registry.cancelled_before_start.clear();
+        }
+        registry.cancelled_before_start.insert(request_id);
+        true
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,7 +107,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             ollama_list_models,
-            ollama_chat
+            ollama_chat,
+            ollama_cancel_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

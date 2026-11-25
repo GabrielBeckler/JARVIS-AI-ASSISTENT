@@ -1,4 +1,4 @@
-/** @typedef {{ id?: string, role: "user" | "assistant", content: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed" }} ChatMessage */
+/** @typedef {{ id?: string, role: "system" | "user" | "assistant", content: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed", metrics?: {firstContentMs: number|null, totalElapsedMs: number|null, ollamaTotalMs: number|null, tokensPerSecond: number|null} }} ChatMessage */
 
 /** @param {string | null} saved @param {Array<{id: string, title: string, updatedAt: number, messages: ChatMessage[]}>} starter */
 export function restoreConversations(saved, starter) {

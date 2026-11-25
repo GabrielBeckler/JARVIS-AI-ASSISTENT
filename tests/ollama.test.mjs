@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendAssistantOnce, isCurrentRequest, restoreConversations, updateMessage } from "../src/chat.js";
-import { isModelInstalled, shouldUseFastMode, toChatContext } from "../src/ollama.js";
+import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext } from "../src/ollama.js";
 
 const emptyConversation = (id) => ({ id, title: "Nova conversa", updatedAt: 1, messages: [] });
 
@@ -25,6 +25,19 @@ test("keeps prior history but excludes failed and in-flight attempts", () => {
     { role: "assistant", content: "Resposta legada" },
     { role: "user", content: "Enviada" },
   ]);
+});
+
+test("limits request context to recent complete turns while preserving system instructions and the current prompt", () => {
+  const messages = [
+    { role: "system", content: "Instrução essencial" },
+    { role: "user", content: "antiga longa" },
+    { role: "assistant", content: "resposta antiga" },
+    { role: "user", content: "turno recente" },
+    { role: "assistant", content: "resposta recente" },
+    { role: "user", content: "pergunta atual 🌿" },
+  ];
+  assert.deepEqual(limitChatContext(messages, 64), [messages[0], ...messages.slice(3)]);
+  assert.deepEqual(limitChatContext(messages, 1).slice(-1), [messages.at(-1)]);
 });
 
 test("uses fast mode only for short direct prompts without history", () => {
@@ -74,4 +87,17 @@ test("isolates two conversations and discards delayed replies after a request fi
   assert.equal(completed[0].messages.length, 1);
   assert.equal(completed[1].messages.length, 0);
   assert.equal(appendAssistantOnce(completed, "a", "request-a", aReply)[0].messages.length, 1);
+});
+
+test("keeps cancelled partial text incomplete and excludes it from future prompts", () => {
+  const conversation = emptyConversation("cancelled");
+  conversation.messages = [{ id: "question", role: "user", content: "Pergunta", requestId: "req-1", delivery: "pending" }];
+  const withPartial = appendAssistantOnce([conversation], "cancelled", "req-1:partial", {
+    id: "partial", role: "assistant", content: "Trecho incompleto", requestId: "req-1:partial", delivery: "failed",
+  });
+  const failedQuestion = updateMessage(withPartial, "cancelled", "question", { delivery: "failed" });
+  assert.deepEqual(toChatContext(failedQuestion[0].messages), []);
+  const active = new Map([["cancelled", "req-1"]]);
+  active.delete("cancelled");
+  assert.equal(isCurrentRequest(active, "cancelled", "req-1"), false);
 });

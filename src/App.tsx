@@ -1,7 +1,7 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendAssistantOnce, isCurrentRequest, restoreConversations, updateMessage, type StoredConversation } from "./chat.js";
-import { isModelInstalled, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
-import { listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
+import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
+import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -9,6 +9,11 @@ type Conversation = StoredConversation;
 type Panel = "system" | "ai" | "project";
 type ServiceStatus = "checking" | "available" | "unavailable";
 type ModelStatus = "checking" | "missing" | "ready" | "unknown";
+type StreamState = { requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
+
+function durationLabel(milliseconds: number | null | undefined): string {
+  return milliseconds == null || !Number.isFinite(milliseconds) ? "N/D" : `${(milliseconds / 1000).toFixed(1)} s`;
+}
 
 const ollamaBaseUrl = (import.meta.env.VITE_OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
 const defaultModel = import.meta.env.VITE_OLLAMA_MODEL || "qwen3.5:4b";
@@ -63,14 +68,21 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [modelStatus, setModelStatus] = useState<ModelStatus>("checking");
   const [model, setModel] = useState(defaultModel);
+  const [keepAlive, setKeepAlive] = useState(() => {
+    const saved = localStorage.getItem("jarvis.ollama.keepAlive");
+    return saved && ["0", "5m", "10m"].includes(saved) ? saved : "5m";
+  });
   const modelRef = useRef(model);
   const [activeRequests, setActiveRequests] = useState<Record<string, string>>({});
-  const [streamingByConversation, setStreamingByConversation] = useState<Record<string, { requestId: string; content: string; model: string; createdAt: number }>>({});
+  const [streamingByConversation, setStreamingByConversation] = useState<Record<string, StreamState>>({});
   const [errorsByConversation, setErrorsByConversation] = useState<Record<string, string>>({});
+  const [clockNow, setClockNow] = useState(0);
   const [statusError, setStatusError] = useState("");
   const activeRequestsRef = useRef(new Map<string, string>());
+  const firstContentVisibleRef = useRef(new Map<string, number>());
   const statusCheckRef = useRef(0);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const recent = conversations.filter((conversation) => conversation.messages.length > 0 && conversation.title.toLowerCase().includes(search.toLowerCase()));
   const activeRequestId = activeRequests[active.id];
@@ -88,6 +100,35 @@ function App() {
   useEffect(() => {
     localStorage.setItem("jarvis.conversations", JSON.stringify(conversations));
   }, [conversations]);
+
+  useEffect(() => {
+    localStorage.setItem("jarvis.ollama.keepAlive", keepAlive);
+  }, [keepAlive]);
+
+  useEffect(() => {
+    if (!Object.keys(activeRequests).length) return;
+    const timer = window.setInterval(() => setClockNow(performance.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [activeRequests]);
+
+  useLayoutEffect(() => {
+    const list = messageListRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [activeId, active.messages.length, activeStream?.content]);
+
+  useLayoutEffect(() => {
+    for (const [conversationId, stream] of Object.entries(streamingByConversation)) {
+      if (conversationId !== activeId) continue;
+      if (!stream.content || stream.firstContentMs != null) continue;
+      const firstContentMs = Math.round(performance.now() - stream.startedAt);
+      firstContentVisibleRef.current.set(stream.requestId, firstContentMs);
+      setStreamingByConversation((items) => {
+        const current = items[conversationId];
+        if (!current || current.requestId !== stream.requestId || current.firstContentMs != null) return items;
+        return { ...items, [conversationId]: { ...current, firstContentMs } };
+      });
+    }
+  }, [activeId, streamingByConversation]);
 
   const checkOllama = useCallback(async () => {
     const checkId = ++statusCheckRef.current;
@@ -155,8 +196,9 @@ function App() {
     const requestId = crypto.randomUUID();
     const requestedModel = model;
     const history = toChatContext(conversation.messages.filter((message) => message.id !== retrying?.id));
-    const requestMessages = [...history, { role: "user" as const, content }];
+    const requestMessages = limitChatContext([...history, { role: "user" as const, content }]);
     const now = Date.now();
+    const startedAt = performance.now();
     const userMessage: Message = {
       ...(retrying ?? {}),
       id: retrying?.id ?? crypto.randomUUID(),
@@ -171,7 +213,7 @@ function App() {
 
     statusCheckRef.current += 1;
     setRequestState(conversationId, requestId);
-    setStreamingByConversation((items) => ({ ...items, [conversationId]: { requestId, content: "", model: requestedModel, createdAt: now } }));
+    setStreamingByConversation((items) => ({ ...items, [conversationId]: { requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
     setErrorsByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
     if (!retrying) setDraft("");
     setConversations((items) => items.map((item) => {
@@ -188,25 +230,36 @@ function App() {
     }));
 
     try {
-      const completion = await streamOllamaChat(
+      const request = streamOllamaChat(
         ollamaBaseUrl,
         requestedModel,
         requestMessages,
         shouldUseFastMode(content, history.length > 0) ? false : undefined,
+        requestId,
+        keepAlive,
         (fragment) => {
           answer += fragment;
           if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
           setStreamingByConversation((items) => {
             const previous = items[conversationId];
             if (previous && previous.requestId !== requestId) return items;
-            return { ...items, [conversationId]: { requestId, content: `${previous?.content ?? ""}${fragment}`, model: requestedModel, createdAt: now } };
+            return { ...items, [conversationId]: { requestId, content: `${previous?.content ?? ""}${fragment}`, model: requestedModel, createdAt: now, startedAt, firstContentMs: previous?.firstContentMs ?? null } };
           });
         },
       );
+      const completion = await request.completion;
+      if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+      const completedAt = performance.now();
+      if (answer) await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
       statusCheckRef.current += 1;
       setServiceStatus("available");
       if (modelRef.current === requestedModel) setModelStatus("ready");
+      const totalElapsedMs = Math.round(completedAt - startedAt);
+      const firstContentMs = firstContentVisibleRef.current.get(requestId) ?? null;
+      const ollamaTotalMs = completion.totalDuration == null ? null : completion.totalDuration / 1_000_000;
+      const tokensPerSecond = completion.evalCount != null && completion.evalDuration && completion.evalDuration > 0
+        ? completion.evalCount * 1_000_000_000 / completion.evalDuration : null;
       setConversations((items) => {
         const sent = updateMessage(items, conversationId, userMessage.id!, { delivery: "sent" });
         return appendAssistantOnce(sent, conversationId, requestId, {
@@ -217,8 +270,10 @@ function App() {
           createdAt: Date.now(),
           requestId,
           delivery: "sent",
+          metrics: { firstContentMs, totalElapsedMs, ollamaTotalMs, tokensPerSecond },
         }).map((item) => item.id === conversationId ? { ...item, updatedAt: Date.now() } : item);
       });
+      firstContentVisibleRef.current.delete(requestId);
     } catch (error) {
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
       const result = normalizeOllamaError(error);
@@ -231,6 +286,7 @@ function App() {
         if (result.kind === "model_not_found" && modelRef.current === requestedModel) setModelStatus("missing");
       }
       const partial = answer;
+      const firstVisibleMs = firstContentVisibleRef.current.get(requestId) ?? null;
       setErrorsByConversation((items) => ({ ...items, [conversationId]: result.message }));
       setConversations((items) => {
         let next = updateMessage(items, conversationId, userMessage.id!, { delivery: "failed" });
@@ -238,6 +294,7 @@ function App() {
           next = appendAssistantOnce(next, conversationId, `${requestId}:partial`, {
             id: crypto.randomUUID(), role: "assistant", content: partial,
             model: requestedModel, createdAt: Date.now(), requestId: `${requestId}:partial`, delivery: "failed",
+            metrics: { firstContentMs: firstVisibleMs, totalElapsedMs: null, ollamaTotalMs: null, tokensPerSecond: null },
           });
         }
         return next;
@@ -246,8 +303,32 @@ function App() {
       if (isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) {
         setRequestState(conversationId, null);
         setStreamingByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
+        firstContentVisibleRef.current.delete(requestId);
       }
     }
+  };
+
+  const cancelGeneration = (conversationId: string, requestId: string) => {
+    if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+    const stream = streamingByConversation[conversationId];
+    void cancelOllamaChat(requestId).catch(() => undefined);
+    setRequestState(conversationId, null);
+    firstContentVisibleRef.current.delete(requestId);
+    setStreamingByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
+    setErrorsByConversation((items) => ({ ...items, [conversationId]: stream?.content
+      ? "Geração cancelada. O trecho parcial foi preservado como incompleto e não será enviado ao modelo."
+      : "Geração cancelada antes do primeiro trecho de texto." }));
+    setConversations((items) => {
+      let next = updateMessage(items, conversationId, items.find((item) => item.id === conversationId)?.messages.find((message) => message.requestId === requestId && message.role === "user")?.id ?? "", { delivery: "failed" });
+      if (stream?.content) {
+        next = appendAssistantOnce(next, conversationId, `${requestId}:partial`, {
+          id: crypto.randomUUID(), role: "assistant", content: stream.content, model: stream.model,
+          createdAt: Date.now(), requestId: `${requestId}:partial`, delivery: "failed",
+          metrics: { firstContentMs: stream.firstContentMs, totalElapsedMs: null, ollamaTotalMs: null, tokensPerSecond: null },
+        });
+      }
+      return next;
+    });
   };
 
   return (
@@ -298,7 +379,7 @@ function App() {
               </div>
             </div>
           ) : (
-            <div className="message-list">
+            <div className="message-list" ref={messageListRef}>
               <div className="conversation-date">MENSAGENS DA CONVERSA</div>
               {active.messages.map((message, index) => <article className={`message-row ${message.role} ${message.delivery === "failed" ? "failed" : ""}`} key={`${active.id}-${index}`}>
                 <div className={`message-avatar ${message.role}`}>{message.role === "user" ? "G" : <Icon name="spark" size={15} />}</div>
@@ -306,10 +387,11 @@ function App() {
                   <div className="message-author"><span className="message-author-name">{message.role === "user" ? "Você" : "Jarvis"}</span><span>{message.model ?? "Modelo desconhecido"} · {messageTime(message.createdAt)}</span></div>
                   <p>{message.content}</p>
                   {message.delivery === "failed" && <div className="message-failure-label">{message.role === "assistant" ? "Resposta interrompida · não será enviada no próximo contexto" : "Envio falhou · pergunta preservada"}</div>}
+                  {message.role === "assistant" && message.metrics && <div className="response-metrics">Primeiro texto: {durationLabel(message.metrics.firstContentMs)} · Total: {durationLabel(message.metrics.totalElapsedMs)} · Ollama: {durationLabel(message.metrics.ollamaTotalMs)} · Velocidade: {message.metrics.tokensPerSecond == null ? "N/D" : `${message.metrics.tokensPerSecond.toFixed(1)} tok/s`}</div>}
                   {message.role === "user" && message.delivery === "failed" && <button className="retry-message" onClick={() => void sendMessage(undefined, message.id)} disabled={Boolean(activeRequestId)}>Tentar novamente</button>}
                 </div>
               </article>)}
-              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Jarvis</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <p>{activeStream.content}</p> : <div className="typing-indicator"><i /><i /><i /></div>}</div></article>}
+              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Jarvis</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <p>{activeStream.content}</p> : <div className="typing-indicator"><i /><i /><i /></div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
               <div className="message-end" />
             </div>
           )}
@@ -317,7 +399,7 @@ function App() {
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
               <textarea ref={textarea} rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" />
-              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div><button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || Boolean(activeRequestId)} aria-label={activeRequestId ? "Gerando resposta" : "Enviar mensagem"}>{activeRequestId ? <span className="send-spinner" /> : <Icon name="send" size={16} />}</button></div>
+              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim()} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
           </div>
@@ -338,7 +420,7 @@ function App() {
           <div className="chart-card"><div className="chart-title"><span>Atividade recente</span><span>ÚLTIMOS 60S</span></div><div className="chart-placeholder"><div className="chart-grid"><i /><i /><i /></div><div className="chart-empty">Aguardando dados do sistema</div></div><div className="chart-legend"><span><i className="violet-dot" />CPU</span><span><i className="blue-dot" />RAM</span><span><i className="amber-dot" />GPU</span></div></div>
           <div className="system-footer"><span className="pulse-dot" /> Coleta de sensores não configurada</div>
         </div>}
-        {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="metric-card"><div className="metric-head"><span>Velocidade de geração</span><span className="metric-value na">— tok/s</span></div><div className="metric-foot"><span>Métricas da geração</span><span>Disponíveis após resposta</span></div></div><div className="dashboard-note"><span className="note-icon">i</span><p>Use um modelo já instalado no Ollama. O nome acima pode ser editado para corresponder à sua biblioteca local.</p></div></div>}
+        {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
         {panel === "project" && <div className="dashboard-content project-empty"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
         <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>
       </aside>

@@ -3,6 +3,7 @@ use std::{net::IpAddr, time::Duration};
 use futures_util::StreamExt;
 use reqwest::{Client, Response, Url};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -17,6 +18,7 @@ pub enum OllamaErrorKind {
     Http,
     InvalidResponse,
     EmptyResponse,
+    Cancelled,
     ChannelClosed,
 }
 
@@ -98,6 +100,7 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    keep_alive: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     think: Option<bool>,
 }
@@ -236,53 +239,53 @@ pub async fn chat<F>(
     model: &str,
     messages: &[ChatMessage],
     think: Option<bool>,
+    keep_alive: Option<&str>,
+    cancellation: CancellationToken,
     mut on_content: F,
 ) -> Result<ChatCompletion, OllamaError>
 where
     F: FnMut(String) -> Result<(), OllamaError> + Send,
 {
     let url = endpoint(base, "/api/chat")?;
-    let response = client(CHAT_TIMEOUT)?
-        .post(url)
-        .json(&ChatRequest {
-            model,
-            messages,
-            stream: true,
-            think,
-        })
-        .send()
-        .await
-        .map_err(transport_error)?;
+    let request = client(CHAT_TIMEOUT)?.post(url).json(&ChatRequest {
+        model,
+        messages,
+        stream: true,
+        keep_alive,
+        think,
+    });
+    let response = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(cancelled_error()),
+        response = request.send() => response.map_err(transport_error)?,
+    };
     if !response.status().is_success() {
         return Err(http_error(response).await);
     }
 
     let mut stream = response.bytes_stream();
-    let mut pending = Vec::new();
-    let mut final_chunk: Option<StreamChunk> = None;
-    let mut content = String::new();
-    while let Some(next) = stream.next().await {
-        let bytes = next.map_err(transport_error)?;
-        for byte in bytes {
-            if byte == b'\n' {
-                process_stream_line(&pending, &mut on_content, &mut final_chunk, &mut content)?;
-                pending.clear();
-            } else {
-                pending.push(byte);
-            }
+    let mut parser = NdjsonParser::default();
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancelled_error()),
+            next = stream.next() => next,
+        };
+        let Some(next) = next else { break };
+        parser.push(&next.map_err(transport_error)?, &mut on_content)?;
+        if cancellation.is_cancelled() {
+            return Err(cancelled_error());
         }
     }
-    if !pending.iter().all(u8::is_ascii_whitespace) {
-        process_stream_line(&pending, &mut on_content, &mut final_chunk, &mut content)?;
-    }
+    parser.finish(&mut on_content)?;
 
-    let Some(final_chunk) = final_chunk else {
+    let Some(final_chunk) = parser.final_chunk else {
         return Err(OllamaError::new(
             OllamaErrorKind::InvalidResponse,
             "Ollama encerrou o fluxo sem indicar que a resposta terminou.",
         ));
     };
-    if content.trim().is_empty() {
+    if parser.content.trim().is_empty() {
         return Err(OllamaError::new(
             OllamaErrorKind::EmptyResponse,
             "O modelo encerrou a geração sem retornar conteúdo.",
@@ -290,7 +293,7 @@ where
     }
     Ok(ChatCompletion {
         model: final_chunk.model.unwrap_or_else(|| model.to_string()),
-        content,
+        content: parser.content,
         total_duration: final_chunk.total_duration,
         load_duration: final_chunk.load_duration,
         prompt_eval_duration: final_chunk.prompt_eval_duration,
@@ -298,6 +301,58 @@ where
         prompt_eval_count: final_chunk.prompt_eval_count,
         eval_count: final_chunk.eval_count,
     })
+}
+
+fn cancelled_error() -> OllamaError {
+    OllamaError::new(
+        OllamaErrorKind::Cancelled,
+        "Geração cancelada pelo usuário.",
+    )
+}
+
+#[derive(Default)]
+struct NdjsonParser {
+    pending: Vec<u8>,
+    final_chunk: Option<StreamChunk>,
+    content: String,
+}
+
+impl NdjsonParser {
+    fn push<F>(&mut self, bytes: &[u8], on_content: &mut F) -> Result<(), OllamaError>
+    where
+        F: FnMut(String) -> Result<(), OllamaError>,
+    {
+        for byte in bytes {
+            if *byte == b'\n' {
+                process_stream_line(
+                    &self.pending,
+                    on_content,
+                    &mut self.final_chunk,
+                    &mut self.content,
+                )?;
+                self.pending.clear();
+            } else {
+                self.pending.push(*byte);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish<F>(&mut self, on_content: &mut F) -> Result<(), OllamaError>
+    where
+        F: FnMut(String) -> Result<(), OllamaError>,
+    {
+        if !self.pending.iter().all(u8::is_ascii_whitespace) {
+            process_stream_line(
+                &self.pending,
+                on_content,
+                &mut self.final_chunk,
+                &mut self.content,
+            )?;
+            self.pending.clear();
+        }
+        Ok(())
+    }
 }
 
 fn process_stream_line<F>(
@@ -358,7 +413,9 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        process::Command,
         thread,
+        time::Instant,
     };
 
     fn mock_response(status: u16, body: &'static str) -> (String, thread::JoinHandle<Vec<u8>>) {
@@ -424,12 +481,112 @@ mod tests {
         tauri::async_runtime::block_on(future)
     }
 
+    fn median_optional<F>(samples: &[(u128, u128, ChatCompletion)], extract: F) -> Option<f64>
+    where
+        F: Fn(&ChatCompletion) -> Option<f64>,
+    {
+        let mut values: Vec<_> = samples
+            .iter()
+            .filter_map(|sample| extract(&sample.2))
+            .collect();
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_by(f64::total_cmp);
+        Some(values[values.len() / 2])
+    }
+
     #[test]
     fn accepts_only_local_ollama_endpoints() {
         assert!(base_url("http://127.0.0.1:11434").is_ok());
         assert!(base_url("http://localhost:11434").is_ok());
         assert!(base_url("http://192.168.1.5:11434").is_err());
         assert!(base_url("https://ollama.com").is_err());
+    }
+
+    #[test]
+    fn parses_fragmented_unicode_and_multiple_ndjson_records() {
+        let first = r#"{"message":{"content":"Olá 🌿"},"done":false}"#;
+        let second = r#"{"message":{"content":" mundo"},"done":true,"eval_count":3,"eval_duration":1500000000}"#;
+        let payload = format!("{first}\n{second}\n");
+        let bytes = payload.as_bytes();
+        let split = bytes
+            .windows(4)
+            .position(|window| window == "🌿".as_bytes())
+            .unwrap()
+            + 2;
+        let mut parser = NdjsonParser::default();
+        let mut fragments = Vec::new();
+        let mut on_content = |fragment| {
+            fragments.push(fragment);
+            Ok(())
+        };
+        parser
+            .push(&bytes[..split], &mut on_content)
+            .expect("first network block");
+        parser
+            .push(&bytes[split..], &mut on_content)
+            .expect("remaining network block");
+        parser.finish(&mut on_content).expect("complete stream");
+        assert_eq!(fragments, ["Olá 🌿", " mundo"]);
+        assert_eq!(parser.content, "Olá 🌿 mundo");
+        assert_eq!(
+            parser
+                .final_chunk
+                .as_ref()
+                .and_then(|chunk| chunk.eval_count),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn cancellation_interrupts_before_model_request() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = run(chat(
+            "http://127.0.0.1:1",
+            "qwen3.5:4b",
+            &[],
+            None,
+            None,
+            cancellation,
+            |_| Ok(()),
+        ))
+        .expect_err("cancellation expected");
+        assert_eq!(result.kind, OllamaErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_after_first_fragment_does_not_complete_the_turn() {
+        let (url, server) = mock_response(
+            200,
+            concat!(
+                r#"{"message":{"content":"parcial"},"done":false}"#,
+                "\n",
+                r#"{"message":{"content":" completa"},"done":true}"#,
+                "\n"
+            ),
+        );
+        let cancellation = CancellationToken::new();
+        let callback_cancellation = cancellation.clone();
+        let mut fragments = Vec::new();
+        let result = run(chat(
+            &url,
+            "qwen3.5:4b",
+            &[],
+            None,
+            Some("5m"),
+            cancellation,
+            |fragment| {
+                fragments.push(fragment);
+                callback_cancellation.cancel();
+                Ok(())
+            },
+        ))
+        .expect_err("cancelled response must not become a completed turn");
+        assert_eq!(result.kind, OllamaErrorKind::Cancelled);
+        assert_eq!(fragments.first().map(String::as_str), Some("parcial"));
+        server.join().expect("mock server");
     }
 
     #[test]
@@ -478,8 +635,16 @@ mod tests {
         server.join().expect("mock server");
 
         let (missing_url, missing_server) = mock_response(404, r#"{"error":"model not found"}"#);
-        let failure = run(chat(&missing_url, "missing:latest", &[], None, |_| Ok(())))
-            .expect_err("model missing expected");
+        let failure = run(chat(
+            &missing_url,
+            "missing:latest",
+            &[],
+            None,
+            None,
+            CancellationToken::new(),
+            |_| Ok(()),
+        ))
+        .expect_err("model missing expected");
         assert_eq!(failure.kind, OllamaErrorKind::ModelNotFound);
         missing_server.join().expect("mock server");
 
@@ -490,8 +655,16 @@ mod tests {
                 "\n"
             ),
         );
-        let success = run(chat(&success_url, "qwen3.5:4b", &[], None, |_| Ok(())))
-            .expect("success after failure");
+        let success = run(chat(
+            &success_url,
+            "qwen3.5:4b",
+            &[],
+            None,
+            None,
+            CancellationToken::new(),
+            |_| Ok(()),
+        ))
+        .expect("success after failure");
         assert_eq!(success.content, "OK");
         success_server.join().expect("mock server");
     }
@@ -510,10 +683,18 @@ mod tests {
             content: "Oi".into(),
         }];
         let mut fragments = Vec::new();
-        let result = run(chat(&url, "qwen3.5:4b", &messages, Some(false), |part| {
-            fragments.push(part);
-            Ok(())
-        }))
+        let result = run(chat(
+            &url,
+            "qwen3.5:4b",
+            &messages,
+            Some(false),
+            Some("5m"),
+            CancellationToken::new(),
+            |part| {
+                fragments.push(part);
+                Ok(())
+            },
+        ))
         .expect("chat response");
         assert_eq!(fragments, ["Olá", "!"]);
         assert_eq!(result.model, "qwen3.5:4b");
@@ -522,6 +703,7 @@ mod tests {
         let request_bytes = server.join().expect("mock server");
         let request = String::from_utf8_lossy(&request_bytes);
         assert!(request.contains("\"think\":false"));
+        assert!(request.contains("\"keep_alive\":\"5m\""));
         assert!(request.contains("\"content\":\"Oi\""));
     }
 
@@ -532,18 +714,90 @@ mod tests {
             (r#"{"done":true}"#, OllamaErrorKind::EmptyResponse),
         ] {
             let (url, server) = mock_response(200, body);
-            let result = run(chat(&url, "qwen3.5:4b", &[], None, |_| Ok(())))
-                .expect_err("chat error expected");
+            let result = run(chat(
+                &url,
+                "qwen3.5:4b",
+                &[],
+                None,
+                None,
+                CancellationToken::new(),
+                |_| Ok(()),
+            ))
+            .expect_err("chat error expected");
             assert_eq!(result.kind, kind);
             server.join().expect("mock server");
         }
     }
 
     #[test]
+    fn treats_eof_without_done_as_an_incomplete_stream() {
+        let body = r#"{"message":{"content":"parcial"},"done":false}"#;
+        let (url, server) = mock_response(200, body);
+        let mut visible = String::new();
+        let result = run(chat(
+            &url,
+            "qwen3.5:4b",
+            &[],
+            None,
+            Some("5m"),
+            CancellationToken::new(),
+            |fragment| {
+                visible.push_str(&fragment);
+                Ok(())
+            },
+        ))
+        .expect_err("EOF without done must not complete a turn");
+        assert_eq!(result.kind, OllamaErrorKind::InvalidResponse);
+        assert!(
+            result
+                .message
+                .contains("sem indicar que a resposta terminou")
+        );
+        assert_eq!(visible, "parcial");
+        server.join().expect("mock server");
+    }
+
+    #[test]
+    fn preserves_but_does_not_complete_content_before_stream_error() {
+        let body = concat!(
+            r#"{"message":{"content":"parcial"},"done":false}"#,
+            "\n",
+            r#"{"error":"generation failed"}"#,
+            "\n"
+        );
+        let (url, server) = mock_response(200, body);
+        let mut visible = String::new();
+        let result = run(chat(
+            &url,
+            "qwen3.5:4b",
+            &[],
+            None,
+            Some("5m"),
+            CancellationToken::new(),
+            |fragment| {
+                visible.push_str(&fragment);
+                Ok(())
+            },
+        ))
+        .expect_err("stream error expected");
+        assert_eq!(result.kind, OllamaErrorKind::Http);
+        assert_eq!(visible, "parcial");
+        server.join().expect("mock server");
+    }
+
+    #[test]
     fn identifies_model_missing_reported_inside_stream() {
         let (url, server) = mock_response(200, r#"{"error":"model 'missing:latest' not found"}"#);
-        let result = run(chat(&url, "missing:latest", &[], None, |_| Ok(())))
-            .expect_err("model missing expected");
+        let result = run(chat(
+            &url,
+            "missing:latest",
+            &[],
+            None,
+            None,
+            CancellationToken::new(),
+            |_| Ok(()),
+        ))
+        .expect_err("model missing expected");
         assert_eq!(result.kind, OllamaErrorKind::ModelNotFound);
         server.join().expect("mock server");
     }
@@ -565,8 +819,93 @@ mod tests {
             role: "user".into(),
             content: "Responda apenas com OK.".into(),
         }];
-        let completion = run(chat(&base, &model, &messages, Some(false), |_| Ok(())))
-            .expect("local Ollama response");
+        let completion = run(chat(
+            &base,
+            &model,
+            &messages,
+            Some(false),
+            Some("5m"),
+            CancellationToken::new(),
+            |_| Ok(()),
+        ))
+        .expect("local Ollama response");
         assert!(!completion.content.trim().is_empty());
+    }
+
+    #[test]
+    #[ignore = "benchmark: requires local Ollama, installed model, and the ollama CLI"]
+    fn benchmarks_five_cold_and_five_warm_backend_generations() {
+        assert_eq!(std::env::var("JARVIS_OLLAMA_BENCH").as_deref(), Ok("1"));
+        let base = std::env::var("JARVIS_OLLAMA_BASE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+        let model = std::env::var("JARVIS_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into());
+        let messages = [ChatMessage {
+            role: "user".into(),
+            content: "Responda somente com a palavra quatro.".into(),
+        }];
+        let sample = || {
+            let start = Instant::now();
+            let mut first_content_ms = None;
+            let completion = run(chat(
+                &base,
+                &model,
+                &messages,
+                Some(false),
+                Some("5m"),
+                CancellationToken::new(),
+                |_| {
+                    first_content_ms.get_or_insert_with(|| start.elapsed().as_millis());
+                    Ok(())
+                },
+            ))
+            .expect("local Ollama generation");
+            (
+                first_content_ms.expect("first content available"),
+                start.elapsed().as_millis(),
+                completion,
+            )
+        };
+        let summarize = |label: &str, samples: &mut Vec<(u128, u128, ChatCompletion)>| {
+            let mut firsts: Vec<_> = samples.iter().map(|sample| sample.0).collect();
+            let mut totals: Vec<_> = samples.iter().map(|sample| sample.1).collect();
+            firsts.sort_unstable();
+            totals.sort_unstable();
+            let max_total = totals.last().copied().unwrap_or_default();
+            let max_first = firsts.last().copied().unwrap_or_default();
+            let median_first = firsts[firsts.len() / 2];
+            let median_total = totals[totals.len() / 2];
+            let load_ms = median_optional(samples, |m| m.load_duration.map(|n| n as f64 / 1e6));
+            let prompt_eval_ms =
+                median_optional(samples, |m| m.prompt_eval_duration.map(|n| n as f64 / 1e6));
+            let eval_ms = median_optional(samples, |m| m.eval_duration.map(|n| n as f64 / 1e6));
+            let tokens_per_second =
+                median_optional(samples, |m| match (m.eval_count, m.eval_duration) {
+                    (Some(count), Some(duration)) if duration > 0 => {
+                        Some(count as f64 * 1e9 / duration as f64)
+                    }
+                    _ => None,
+                });
+            eprintln!(
+                "{label}: n={}, first_median_ms={median_first}, first_max_ms={max_first}, total_median_ms={median_total}, total_max_ms={max_total}, load_median_ms={load_ms:?}, prompt_eval_median_ms={prompt_eval_ms:?}, eval_median_ms={eval_ms:?}, tok_s_median={tokens_per_second:?}",
+                samples.len()
+            );
+        };
+
+        let mut cold = Vec::new();
+        for _ in 0..5 {
+            let _stopped = Command::new("ollama")
+                .args(["stop", &model])
+                .output()
+                .expect("ollama stop");
+            cold.push(sample());
+        }
+        summarize("cold", &mut cold);
+
+        let _warmup = sample();
+        let mut warm = Vec::new();
+        for _ in 0..5 {
+            warm.push(sample());
+        }
+        summarize("warm", &mut warm);
     }
 }
