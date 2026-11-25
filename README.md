@@ -40,7 +40,7 @@ O uso do Ollama e a execução local do modelo não exigem uma conta ou uma API 
 | Recurso | Estado atual |
 | --- | --- |
 | Interface desktop de três áreas | Implementada como interface inicial |
-| Chat textual com Ollama | Implementado com resposta não transmitida em streaming |
+| Chat textual com Ollama | Resposta transmitida em streaming; perguntas diretas e curtas em conversa nova usam o modo rápido quando compatível com o modelo |
 | Verificação da API local do Ollama | Implementada |
 | Histórico de conversas | Persistido no `localStorage` do WebView |
 | Configuração do endpoint e modelo | Disponível por variáveis Vite e editável na aba **IA** |

@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { isModelInstalled, toChatContext, type StoredMessage } from "./ollama.js";
+import { isModelInstalled, readOllamaChatStream, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -55,6 +55,7 @@ function App() {
   const [modelAvailable, setModelAvailable] = useState<boolean | null>(null);
   const [model, setModel] = useState(defaultModel);
   const [generating, setGenerating] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState<{ conversationId: string; content: string } | null>(null);
   const [notice, setNotice] = useState("");
   const textarea = useRef<HTMLTextAreaElement>(null);
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
@@ -114,6 +115,7 @@ function App() {
     const nextMessages = [...toChatContext(active.messages), userMessage];
     setDraft("");
     setGenerating(true);
+    setStreamingMessage({ conversationId: id, content: "" });
     setNotice("");
     updateConversation(id, (conversation) => ({
       ...conversation,
@@ -121,35 +123,58 @@ function App() {
       updatedAt: Date.now(),
       messages: [...conversation.messages, userMessage],
     }));
+    let answer = "";
     try {
       const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, stream: false, messages: nextMessages }),
+        body: JSON.stringify({
+          model,
+          stream: true,
+          ...(shouldUseFastMode(content, nextMessages.length > 1) ? { think: false } : {}),
+          messages: nextMessages,
+        }),
         signal: AbortSignal.timeout(120000),
       });
       setOllama("online");
-      const result = await response.json() as { message?: { content?: string }; error?: string };
-      if (!response.ok) throw new Error(result.error || `Ollama respondeu com erro (${response.status}).`);
-      if (result.error) throw new Error(result.error);
-      const answer = result.message?.content?.trim();
+      if (!response.ok) {
+        const result = await response.json() as { error?: string };
+        throw new Error(result.error || `Ollama respondeu com erro (${response.status}).`);
+      }
+      if (!response.body) throw new Error("O Ollama não abriu o fluxo de resposta.");
+      const result = await readOllamaChatStream(response.body, (content) => {
+        answer = content;
+        setStreamingMessage({ conversationId: id, content });
+      });
+      answer = result.content.trim();
       if (!answer) throw new Error("O modelo não retornou uma resposta.");
       updateConversation(id, (conversation) => ({ ...conversation, updatedAt: Date.now(), messages: [...conversation.messages, { role: "assistant", content: answer }] }));
+      setModelAvailable(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Não foi possível conectar ao Ollama.";
       const connectionFailure = error instanceof TypeError || (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name));
-      setNotice(connectionFailure ? `${message} Verifique se o Ollama está ativo e permite conexões do aplicativo.` : message);
+      setNotice(answer
+        ? `A resposta foi interrompida: ${message}`
+        : connectionFailure ? `${message} Verifique se o Ollama está ativo e permite conexões do aplicativo.` : message);
       if (connectionFailure) {
         setOllama("offline");
       }
-      updateConversation(id, (conversation) => ({
-        ...conversation,
-        messages: conversation.messages.map((item, index) => index === conversation.messages.length - 1 && item.role === "user" && item.content === content
-          ? { ...item, delivery: "failed" }
-          : item),
-      }));
-      setDraft(content);
+      if (answer) {
+        updateConversation(id, (conversation) => ({
+          ...conversation,
+          messages: [...conversation.messages, { role: "assistant", content: answer, delivery: "failed" }],
+        }));
+      } else {
+        updateConversation(id, (conversation) => ({
+          ...conversation,
+          messages: conversation.messages.map((item, index) => index === conversation.messages.length - 1 && item.role === "user" && item.content === content
+            ? { ...item, delivery: "failed" }
+            : item),
+        }));
+        setDraft(content);
+      }
     } finally {
+      setStreamingMessage(null);
       setGenerating(false);
     }
   };
@@ -208,9 +233,9 @@ function App() {
               <div className="conversation-date">HOJE <span /> {formattedTime}</div>
               {active.messages.map((message, index) => <article className={`message-row ${message.role} ${message.delivery === "failed" ? "failed" : ""}`} key={`${active.id}-${index}`}>
                 <div className={`message-avatar ${message.role}`}>{message.role === "user" ? "G" : <Icon name="spark" size={15} />}</div>
-                <div className="message-content"><div className="message-author">{message.role === "user" ? "Você" : "Jarvis"}<span>{message.role === "user" ? (message.delivery === "failed" ? "Falha no envio · edite e tente novamente" : "") : model}</span></div><p>{message.content}</p></div>
+                <div className="message-content"><div className="message-author">{message.role === "user" ? "Você" : "Jarvis"}<span>{message.role === "user" ? (message.delivery === "failed" ? "Falha no envio · edite e tente novamente" : "") : message.delivery === "failed" ? "Resposta interrompida · não incluída no contexto" : model}</span></div><p>{message.content}</p></div>
               </article>)}
-              {generating && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author">Jarvis<span>{model}</span></div><div className="typing-indicator"><i /><i /><i /></div></div></article>}
+              {generating && streamingMessage?.conversationId === active.id && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author">Jarvis<span>{model}</span></div>{streamingMessage.content ? <p>{streamingMessage.content}</p> : <div className="typing-indicator"><i /><i /><i /></div>}</div></article>}
               <div className="message-end" />
             </div>
           )}
