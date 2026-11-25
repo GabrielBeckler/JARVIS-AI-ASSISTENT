@@ -1,7 +1,8 @@
-import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { isModelInstalled, toChatContext, type StoredMessage } from "./ollama.js";
 import "./App.css";
 
-type Message = { role: "user" | "assistant"; content: string };
+type Message = StoredMessage;
 type Conversation = { id: string; title: string; updatedAt: number; messages: Message[] };
 type Panel = "system" | "ai" | "project";
 
@@ -51,6 +52,7 @@ function App() {
   const [search, setSearch] = useState("");
   const [panel, setPanel] = useState<Panel>("system");
   const [ollama, setOllama] = useState<"checking" | "online" | "offline">("checking");
+  const [modelAvailable, setModelAvailable] = useState<boolean | null>(null);
   const [model, setModel] = useState(defaultModel);
   const [generating, setGenerating] = useState(false);
   const [notice, setNotice] = useState("");
@@ -62,20 +64,33 @@ function App() {
     localStorage.setItem("jarvis.conversations", JSON.stringify(conversations));
   }, [conversations]);
 
+  const checkOllama = useCallback(async () => {
+      try {
+        const response = await fetch(`${ollamaBaseUrl}/api/tags`, { signal: AbortSignal.timeout(1800) });
+        if (!response.ok) {
+          setOllama("offline");
+          setModelAvailable(null);
+          return;
+        }
+        const result = await response.json() as { models?: { name?: string; model?: string }[] };
+        setOllama("online");
+        setModelAvailable(isModelInstalled(result.models ?? [], model));
+      } catch {
+        setOllama("offline");
+        setModelAvailable(null);
+      }
+  }, [model]);
+
   useEffect(() => {
     let alive = true;
     const check = async () => {
-      try {
-        const response = await fetch(`${ollamaBaseUrl}/api/tags`, { signal: AbortSignal.timeout(1800) });
-        if (alive) setOllama(response.ok ? "online" : "offline");
-      } catch {
-        if (alive) setOllama("offline");
-      }
+      if (!alive) return;
+      await checkOllama();
     };
     void check();
     const timer = window.setInterval(check, 15000);
     return () => { alive = false; window.clearInterval(timer); };
-  }, []);
+  }, [checkOllama]);
 
   const updateConversation = (id: string, update: (conversation: Conversation) => Conversation) => {
     setConversations((items) => items.map((item) => item.id === id ? update(item) : item));
@@ -96,7 +111,7 @@ function App() {
     if (!active) return;
     const id = active.id;
     const userMessage: Message = { role: "user", content };
-    const nextMessages = [...active.messages, userMessage];
+    const nextMessages = [...toChatContext(active.messages), userMessage];
     setDraft("");
     setGenerating(true);
     setNotice("");
@@ -113,16 +128,27 @@ function App() {
         body: JSON.stringify({ model, stream: false, messages: nextMessages }),
         signal: AbortSignal.timeout(120000),
       });
-      if (!response.ok) throw new Error(`Ollama respondeu com erro (${response.status}).`);
+      setOllama("online");
       const result = await response.json() as { message?: { content?: string }; error?: string };
+      if (!response.ok) throw new Error(result.error || `Ollama respondeu com erro (${response.status}).`);
       if (result.error) throw new Error(result.error);
       const answer = result.message?.content?.trim();
       if (!answer) throw new Error("O modelo não retornou uma resposta.");
       updateConversation(id, (conversation) => ({ ...conversation, updatedAt: Date.now(), messages: [...conversation.messages, { role: "assistant", content: answer }] }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Não foi possível conectar ao Ollama.";
-      setNotice(`${message} Verifique se o Ollama está ativo e permite conexões do aplicativo.`);
-      setOllama("offline");
+      const connectionFailure = error instanceof TypeError || (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name));
+      setNotice(connectionFailure ? `${message} Verifique se o Ollama está ativo e permite conexões do aplicativo.` : message);
+      if (connectionFailure) {
+        setOllama("offline");
+      }
+      updateConversation(id, (conversation) => ({
+        ...conversation,
+        messages: conversation.messages.map((item, index) => index === conversation.messages.length - 1 && item.role === "user" && item.content === content
+          ? { ...item, delivery: "failed" }
+          : item),
+      }));
+      setDraft(content);
     } finally {
       setGenerating(false);
     }
@@ -180,9 +206,9 @@ function App() {
           ) : (
             <div className="message-list">
               <div className="conversation-date">HOJE <span /> {formattedTime}</div>
-              {active.messages.map((message, index) => <article className={`message-row ${message.role}`} key={`${active.id}-${index}`}>
+              {active.messages.map((message, index) => <article className={`message-row ${message.role} ${message.delivery === "failed" ? "failed" : ""}`} key={`${active.id}-${index}`}>
                 <div className={`message-avatar ${message.role}`}>{message.role === "user" ? "G" : <Icon name="spark" size={15} />}</div>
-                <div className="message-content"><div className="message-author">{message.role === "user" ? "Você" : "Jarvis"}<span>{message.role === "user" ? "" : model}</span></div><p>{message.content}</p></div>
+                <div className="message-content"><div className="message-author">{message.role === "user" ? "Você" : "Jarvis"}<span>{message.role === "user" ? (message.delivery === "failed" ? "Falha no envio · edite e tente novamente" : "") : model}</span></div><p>{message.content}</p></div>
               </article>)}
               {generating && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author">Jarvis<span>{model}</span></div><div className="typing-indicator"><i /><i /><i /></div></div></article>}
               <div className="message-end" />
@@ -213,7 +239,7 @@ function App() {
           <div className="chart-card"><div className="chart-title"><span>Atividade recente</span><span>ÚLTIMOS 60S</span></div><div className="chart-placeholder"><div className="chart-grid"><i /><i /><i /></div><div className="chart-empty">Aguardando dados do sistema</div></div><div className="chart-legend"><span><i className="violet-dot" />CPU</span><span><i className="blue-dot" />RAM</span><span><i className="amber-dot" />GPU</span></div></div>
           <div className="system-footer"><span className="pulse-dot" /> Coleta de sensores não configurada</div>
         </div>}
-        {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${ollama}`}>{ollama === "online" ? "Conectado" : ollama === "checking" ? "Verificando" : "Desconectado"}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p>Modelo local servido pelo Ollama nesta máquina.</p><label className="model-select-label">Modelo<input value={model} onChange={(event) => setModel(event.target.value)} aria-label="Nome do modelo Ollama" /></label><button className="outline-action" onClick={() => { setOllama("checking"); fetch(`${ollamaBaseUrl}/api/tags`, { signal: AbortSignal.timeout(1800) }).then((response) => setOllama(response.ok ? "online" : "offline")).catch(() => setOllama("offline")); }}>Verificar conexão</button></div><div className="metric-card"><div className="metric-head"><span>Velocidade de geração</span><span className="metric-value na">— tok/s</span></div><div className="metric-foot"><span>Métricas da geração</span><span>Disponíveis após resposta</span></div></div><div className="dashboard-note"><span className="note-icon">i</span><p>Use um modelo já instalado no Ollama. O nome acima pode ser editado para corresponder à sua biblioteca local.</p></div></div>}
+        {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${ollama}`}>{ollama === "online" ? "Servidor conectado" : ollama === "checking" ? "Verificando servidor" : "Servidor desconectado"}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className={`model-availability ${modelAvailable === false ? "missing" : ""}`}>{modelAvailable === null ? "Disponibilidade do modelo não verificada" : modelAvailable ? "Modelo instalado no Ollama" : "Modelo não encontrado no Ollama"}</p><label className="model-select-label">Modelo<input value={model} onChange={(event) => { setModel(event.target.value); setModelAvailable(null); }} aria-label="Nome do modelo Ollama" /></label><button className="outline-action" onClick={() => { setOllama("checking"); void checkOllama(); }}>Verificar conexão e modelo</button></div><div className="metric-card"><div className="metric-head"><span>Velocidade de geração</span><span className="metric-value na">— tok/s</span></div><div className="metric-foot"><span>Métricas da geração</span><span>Disponíveis após resposta</span></div></div><div className="dashboard-note"><span className="note-icon">i</span><p>Use um modelo já instalado no Ollama. O nome acima pode ser editado para corresponder à sua biblioteca local.</p></div></div>}
         {panel === "project" && <div className="dashboard-content project-empty"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setNotice("O cadastro de projetos será habilitado em uma próxima etapa.")}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
         <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>
       </aside>
