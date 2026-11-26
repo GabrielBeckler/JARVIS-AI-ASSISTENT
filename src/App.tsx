@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage, type StoredConversation } from "./chat.js";
+import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage, type StoredConversation } from "./chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import { MarkdownMessage } from "./MarkdownMessage.js";
@@ -10,6 +10,8 @@ import { getSystemSnapshot } from "./systemMonitor";
 import { createSystemContextPrompt, isSystemQuestion } from "./systemContext.js";
 import { calculateComposerSize } from "./composerSizing.js";
 import { copyResponseText } from "./clipboard.js";
+import { resolveConversationTitle, validateConversationTitle } from "./conversationTitle.js";
+import { getConversationShortcut } from "./conversationShortcuts.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -20,6 +22,7 @@ type ModelStatus = "checking" | "missing" | "ready" | "unknown";
 type ChatStoreStatus = "checking" | "ready" | "failed";
 type StreamState = { requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
 type CopyFeedback = { label: string; failed: boolean };
+type RenameDialogState = { conversationId: string; value: string };
 
 function durationLabel(milliseconds: number | null | undefined): string {
   return milliseconds == null || !Number.isFinite(milliseconds) ? "N/D" : `${(milliseconds / 1000).toFixed(1)} s`;
@@ -52,6 +55,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
     stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
     copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
+    edit: <><path d="m14 5 5 5" /><path d="m4 20 4.5-.9L19.2 8.4a2.1 2.1 0 0 0-3-3L5.5 16.1 4 20Z" /></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] ?? paths.spark}</svg>;
 }
@@ -78,6 +82,7 @@ function App() {
   const [activeId, setActiveId] = useState(conversations[0]?.id ?? starter.id);
   const [draftsByConversation, setDraftsByConversation] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
+  const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [panel, setPanel] = useState<Panel>("system");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [modelStatus, setModelStatus] = useState<ModelStatus>("checking");
@@ -99,11 +104,15 @@ function App() {
   const preserveLegacyCopyRef = useRef(false);
   const statusCheckRef = useRef(0);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const focusNewConversationRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
   const copyFeedbackTimersRef = useRef(new Map<string, number>());
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const draft = getConversationDraft(draftsByConversation, active.id);
+  const renameValidation = renameDialog ? validateConversationTitle(renameDialog.value) : null;
   const recent = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
   const activeRequestId = activeRequests[active.id];
   const activeStream = streamingByConversation[active.id];
@@ -194,6 +203,16 @@ function App() {
     list.scrollTop = restoreScrollTop(list, scrollPositionsRef.current.get(active.id));
     syncScrollPosition(active.id, list);
   }, [activeId, active.messages.length, activeStream?.content, syncScrollPosition]);
+
+  useLayoutEffect(() => {
+    if (!focusNewConversationRef.current) return;
+    focusNewConversationRef.current = false;
+    textarea.current?.focus({ preventScroll: true });
+  }, [activeId]);
+
+  useEffect(() => {
+    if (renameDialog) renameInput.current?.focus();
+  }, [renameDialog?.conversationId]);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -297,11 +316,53 @@ function App() {
     return () => { alive = false; window.clearInterval(timer); };
   }, [checkOllama]);
 
-  const newConversation = () => {
+  const newConversation = useCallback(() => {
+    if (chatStoreStatus === "checking") return;
     const conversation = { ...starter, id: crypto.randomUUID(), updatedAt: Date.now() };
+    focusNewConversationRef.current = true;
     setConversations((items) => [conversation, ...items]);
     setActiveId(conversation.id);
-    textarea.current?.focus();
+  }, [chatStoreStatus]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLocaleLowerCase("en-US");
+      const localShortcutChord = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && (key === "k" || key === "f");
+      if (!localShortcutChord) return;
+      const overlayOpen = Boolean(document.querySelector('dialog[open], [role="dialog"]:not([hidden]), [role="menu"]:not([hidden]), [aria-modal="true"]'));
+      // Ctrl+F must never reach the WebView's built-in page finder, including repeats.
+      if (key === "f" && !event.isComposing && !event.defaultPrevented) event.preventDefault();
+      if (overlayOpen) {
+        return;
+      }
+      const action = getConversationShortcut(event, overlayOpen);
+      if (!action) {
+        if (event.repeat) event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "new_conversation") newConversation();
+      else searchInput.current?.focus();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [newConversation]);
+
+  const startRenameConversation = (conversation: Conversation) => {
+    setRenameDialog({ conversationId: conversation.id, value: conversation.title ?? "" });
+  };
+
+  const closeRenameDialog = () => setRenameDialog(null);
+
+  const saveConversationTitle = (event: FormEvent) => {
+    event.preventDefault();
+    if (!renameDialog) return;
+    const validation = validateConversationTitle(renameDialog.value);
+    if (!validation.valid) return;
+    const updatedAt = Date.now();
+    setConversations((items) => renameConversationTitle(items, renameDialog.conversationId, validation.value, updatedAt));
+    setRenameDialog(null);
   };
 
   const updateActiveDraft = (value: string) => {
@@ -382,7 +443,7 @@ function App() {
         : [...item.messages, userMessage];
       return {
         ...item,
-        title: item.messages.length ? (item.title ?? content.slice(0, 36)) : content.slice(0, 36),
+        title: resolveConversationTitle(item.messages.length === 0 && item.title === "Nova conversa" ? undefined : item.title, item.messages, content),
         updatedAt: now,
         messages,
       };
@@ -508,8 +569,8 @@ function App() {
           <div className="brand-mark"><Icon name="spark" size={19} /></div>
           <div><strong>JARVIS</strong><span>LOCAL INTELLIGENCE</span></div>
         </div>
-        <button className="new-chat" onClick={newConversation} disabled={chatStoreStatus === "checking"}><Icon name="plus" size={17} /><span>{chatStoreStatus === "checking" ? "Restaurando histórico…" : "Nova conversa"}</span><kbd>⌘ K</kbd></button>
-        <label className="search-box"><Icon name="search" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversas" /><kbd>⌘ F</kbd></label>
+        <button className="new-chat" onClick={newConversation} disabled={chatStoreStatus === "checking"}><Icon name="plus" size={17} /><span>{chatStoreStatus === "checking" ? "Restaurando histórico…" : "Nova conversa"}</span><kbd>Ctrl K</kbd></button>
+        <label className="search-box"><Icon name="search" size={16} /><input ref={searchInput} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversas" aria-label="Buscar conversas" /><kbd>Ctrl F</kbd></label>
         <div className="sidebar-section">
           <div className="section-label">WORKSPACE <button aria-label="Opções do workspace"><Icon name="more" size={16} /></button></div>
           <button className="nav-item"><span className="nav-icon"><Icon name="folder" size={16} /></span><span>Projetos</span><span className="nav-count">0</span></button>
@@ -517,11 +578,15 @@ function App() {
         </div>
         <div className="sidebar-section recent-section">
           <div className="section-label">RECENTES <button aria-label="Ordenar conversas"><Icon name="more" size={16} /></button></div>
-          {recent.length ? recent.slice(0, 8).map((conversation) => (
-            <button key={conversation.id} onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={conversation.title ?? "Conversa sem título"}>
-              <Icon name="chat" size={15} /><span>{conversation.title ?? "Conversa sem título"}</span>
-            </button>
-          )) : <p className="empty-recent">Suas conversas aparecerão aqui.</p>}
+          {recent.length ? recent.slice(0, 8).map((conversation) => {
+            const title = conversation.title ?? "Conversa sem título";
+            return <div key={conversation.id} className="conversation-entry">
+              <button onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-label={`Abrir conversa: ${title}`}>
+                <Icon name="chat" size={15} /><span>{title}</span>
+              </button>
+              <button type="button" className="conversation-rename" onClick={() => startRenameConversation(conversation)} disabled={chatStoreStatus === "checking"} aria-label={`Renomear conversa: ${title}`} title={`Renomear: ${title}`}><Icon name="edit" size={13} /></button>
+            </div>;
+          }) : <p className="empty-recent">Suas conversas aparecerão aqui.</p>}
         </div>
         <div className="sidebar-bottom">
           <div className="local-badge"><span className="pulse-dot" /> Seus dados ficam neste dispositivo</div>
@@ -531,7 +596,7 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong>{active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong tabIndex={0} title={active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"} aria-label={active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}>{active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}</strong></div>
           <div className="topbar-actions"><div className="model-chip"><span className={`status-dot ${serviceStatus === "checking" ? "checking" : serviceStatus === "available" ? "online" : "offline"}`} />{model}<Icon name="chevron" size={13} /></div><button className="icon-button" aria-label="Mais opções"><Icon name="more" /></button><div className="top-avatar">G</div></div>
         </header>
 
@@ -613,6 +678,32 @@ function App() {
         </div>
         <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>
       </aside>
+      {renameDialog && renameValidation && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeRenameDialog(); }}>
+        <section className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title" onKeyDown={(event) => {
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeRenameDialog(); }
+        }}>
+          <h2 id="rename-dialog-title">Renomear conversa</h2>
+          <form onSubmit={saveConversationTitle}>
+            <label htmlFor="conversation-title-input">Nome da conversa</label>
+            <input
+              id="conversation-title-input"
+              ref={renameInput}
+              value={renameDialog.value}
+              onChange={(event) => setRenameDialog((current) => current ? { ...current, value: event.target.value } : current)}
+              aria-invalid={!renameValidation.valid}
+              aria-describedby="conversation-title-count"
+              autoComplete="off"
+            />
+            <p id="conversation-title-count" className={renameValidation.valid ? "rename-title-count" : "rename-title-count invalid"} role="status" aria-live="polite">
+              {renameValidation.count}/120 caracteres{renameValidation.valid ? "" : renameValidation.count === 0 ? " · O nome não pode ficar vazio." : " · Use no máximo 120 caracteres."}
+            </p>
+            <div className="rename-dialog-actions">
+              <button type="button" className="rename-cancel" onClick={closeRenameDialog}>Cancelar</button>
+              <button type="submit" className="rename-save" disabled={!renameValidation.valid}>Salvar nome</button>
+            </div>
+          </form>
+        </section>
+      </div>}
     </div>
   );
 }

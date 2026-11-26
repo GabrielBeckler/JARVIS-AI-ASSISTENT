@@ -21,3 +21,4 @@ export function captureScrollPosition(element: { scrollTop: number; scrollHeight
 export function restoreScrollTop(element: { scrollHeight: number; clientHeight: number }, saved?: { scrollTop: number; followBottom: boolean }): number;
 export function getConversationDraft(drafts: Readonly<Record<string, string>>, conversationId: string): string;
 export function setConversationDraft(drafts: Readonly<Record<string, string>>, conversationId: string, value: string): Record<string, string>;
+export function renameConversationTitle(conversations: StoredConversation[], conversationId: string, title: string, updatedAt: number): StoredConversation[];

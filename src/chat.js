@@ -71,3 +71,10 @@ export function setConversationDraft(drafts, conversationId, value) {
   else delete next[conversationId];
   return next;
 }
+
+/** @param {Array<{id: string, title?: string, updatedAt?: number, messages: ChatMessage[]}>} conversations @param {string} conversationId @param {string} title @param {number} updatedAt */
+export function renameConversationTitle(conversations, conversationId, title, updatedAt) {
+  return conversations.map((conversation) => conversation.id === conversationId
+    ? { ...conversation, title, updatedAt }
+    : conversation);
+}
