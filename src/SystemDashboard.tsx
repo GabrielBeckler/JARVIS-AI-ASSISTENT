@@ -128,7 +128,7 @@ export function SystemDashboard() {
   const gpuTemp = latest?.temperatures.gpuCelsius;
   const waiting = !latest && !collectionError;
 
-  return <div className="dashboard-content system-dashboard">
+  return <div className="dashboard-content system-dashboard" tabIndex={0} aria-label="Métricas do sistema">
     <div className="system-summary">
       <div className="summary-icon"><SystemIcon name="cpu" size={17} /></div>
       <div><strong>Seu sistema</strong><span>{latest?.platformName ?? "Plataforma não identificada"}</span></div>

@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { appendAssistantOnce, captureScrollPosition, createRequestContext, isCurrentRequest, restoreConversations, restoreScrollTop, updateMessage, type StoredConversation } from "./chat.js";
+import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage, type StoredConversation } from "./chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import { MarkdownMessage } from "./MarkdownMessage.js";
@@ -76,7 +76,7 @@ function App() {
   const [chatStoreError, setChatStoreError] = useState("");
   const [chatStoreWarning, setChatStoreWarning] = useState("");
   const [activeId, setActiveId] = useState(conversations[0]?.id ?? starter.id);
-  const [draft, setDraft] = useState("");
+  const [draftsByConversation, setDraftsByConversation] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [panel, setPanel] = useState<Panel>("system");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
@@ -91,6 +91,7 @@ function App() {
   const [streamingByConversation, setStreamingByConversation] = useState<Record<string, StreamState>>({});
   const [errorsByConversation, setErrorsByConversation] = useState<Record<string, string>>({});
   const [copyFeedbackByKey, setCopyFeedbackByKey] = useState<Record<string, CopyFeedback>>({});
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [clockNow, setClockNow] = useState(0);
   const [statusError, setStatusError] = useState("");
   const activeRequestsRef = useRef(new Map<string, string>());
@@ -102,9 +103,15 @@ function App() {
   const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
   const copyFeedbackTimersRef = useRef(new Map<string, number>());
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
+  const draft = getConversationDraft(draftsByConversation, active.id);
   const recent = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
   const activeRequestId = activeRequests[active.id];
   const activeStream = streamingByConversation[active.id];
+  const syncScrollPosition = useCallback((conversationId: string, list: HTMLDivElement) => {
+    const position = captureScrollPosition(list);
+    scrollPositionsRef.current.set(conversationId, position);
+    if (conversationId === activeId) setShowJumpToLatest(!position.followBottom);
+  }, [activeId]);
   const overallStatusLabel = serviceStatus === "checking" || (serviceStatus === "available" && modelStatus === "checking")
     ? "Verificando"
     : serviceStatus === "unavailable" ? "Serviço indisponível"
@@ -185,12 +192,31 @@ function App() {
     const list = messageListRef.current;
     if (!list) return;
     list.scrollTop = restoreScrollTop(list, scrollPositionsRef.current.get(active.id));
-    scrollPositionsRef.current.set(active.id, captureScrollPosition(list));
-  }, [activeId, active.messages.length, activeStream?.content]);
+    syncScrollPosition(active.id, list);
+  }, [activeId, active.messages.length, activeStream?.content, syncScrollPosition]);
+
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (!list || !active.messages.length || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      list.scrollTop = restoreScrollTop(list, scrollPositionsRef.current.get(active.id));
+      syncScrollPosition(active.id, list);
+    });
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [active.id, active.messages.length > 0, syncScrollPosition]);
 
   const rememberMessageScroll = () => {
     const list = messageListRef.current;
-    if (list) scrollPositionsRef.current.set(active.id, captureScrollPosition(list));
+    if (list) syncScrollPosition(active.id, list);
+  };
+
+  const jumpToLatest = () => {
+    const list = messageListRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+    syncScrollPosition(active.id, list);
+    list.focus({ preventScroll: true });
   };
 
   const resizeComposerTextarea = useCallback(() => {
@@ -275,8 +301,11 @@ function App() {
     const conversation = { ...starter, id: crypto.randomUUID(), updatedAt: Date.now() };
     setConversations((items) => [conversation, ...items]);
     setActiveId(conversation.id);
-    setDraft("");
     textarea.current?.focus();
+  };
+
+  const updateActiveDraft = (value: string) => {
+    setDraftsByConversation((drafts) => setConversationDraft(drafts, active.id, value));
   };
 
   const copyResponse = async (key: string, content: string) => {
@@ -345,7 +374,7 @@ function App() {
     setRequestState(conversationId, requestId);
     setStreamingByConversation((items) => ({ ...items, [conversationId]: { requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
     setErrorsByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
-    if (!retrying) setDraft("");
+    if (!retrying) setDraftsByConversation((drafts) => setConversationDraft(drafts, conversationId, ""));
     setConversations((items) => items.map((item) => {
       if (item.id !== conversationId) return item;
       const messages = retrying
@@ -474,7 +503,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <aside className="left-rail">
+      <aside className="left-rail" aria-label="Navegação e conversas" tabIndex={0}>
         <div className="brand-lockup">
           <div className="brand-mark"><Icon name="spark" size={19} /></div>
           <div><strong>JARVIS</strong><span>LOCAL INTELLIGENCE</span></div>
@@ -514,13 +543,13 @@ function App() {
               <h1>Bom dia, Gabriel<span>.</span></h1>
               <p className="welcome-subtitle">No que vamos trabalhar hoje?</p>
               <div className="suggestion-grid">
-                <button className="suggestion-card" onClick={() => setDraft("Como está o desempenho do meu computador?")}><span className="suggestion-icon violet"><Icon name="cpu" /></span><span><strong>Verificar meu sistema</strong><small>Acompanhe o desempenho do computador</small></span><Icon name="chevron" size={15} /></button>
-                <button className="suggestion-card" onClick={() => setDraft("Me ajude a planejar meu próximo projeto.")}><span className="suggestion-icon blue"><Icon name="folder" /></span><span><strong>Começar um projeto</strong><small>Organize ideias e próximos passos</small></span><Icon name="chevron" size={15} /></button>
-                <button className="suggestion-card" onClick={() => setDraft("Explique como posso usar modelos locais com Ollama.")}><span className="suggestion-icon amber"><Icon name="spark" /></span><span><strong>Explorar IA local</strong><small>Converse com seu modelo no Ollama</small></span><Icon name="chevron" size={15} /></button>
+                <button className="suggestion-card" onClick={() => updateActiveDraft("Como está o desempenho do meu computador?")}><span className="suggestion-icon violet"><Icon name="cpu" /></span><span><strong>Verificar meu sistema</strong><small>Acompanhe o desempenho do computador</small></span><Icon name="chevron" size={15} /></button>
+                <button className="suggestion-card" onClick={() => updateActiveDraft("Me ajude a planejar meu próximo projeto.")}><span className="suggestion-icon blue"><Icon name="folder" /></span><span><strong>Começar um projeto</strong><small>Organize ideias e próximos passos</small></span><Icon name="chevron" size={15} /></button>
+                <button className="suggestion-card" onClick={() => updateActiveDraft("Explique como posso usar modelos locais com Ollama.")}><span className="suggestion-icon amber"><Icon name="spark" /></span><span><strong>Explorar IA local</strong><small>Converse com seu modelo no Ollama</small></span><Icon name="chevron" size={15} /></button>
               </div>
             </div>
           ) : (
-            <div className="message-list" ref={messageListRef} onScroll={rememberMessageScroll}>
+            <div className="message-list" ref={messageListRef} onScroll={rememberMessageScroll} role="region" aria-label="Mensagens da conversa" tabIndex={0}>
               <div className="conversation-date">MENSAGENS DA CONVERSA</div>
               {active.messages.map((message, index) => <article className={`message-row ${message.role} ${message.delivery === "failed" ? "failed" : ""}`} key={`${active.id}-${index}`}>
                 <div className={`message-avatar ${message.role}`}>{message.role === "user" ? "G" : <Icon name="spark" size={15} />}</div>
@@ -542,12 +571,15 @@ function App() {
           )}
           {(chatStoreError || chatStoreWarning) && <div className={`notice-banner ${chatStoreError ? "storage-error" : "storage-warning"}`} role={chatStoreError ? "alert" : "status"}><span>!</span><p>{chatStoreError ? `Banco SQLite de conversas indisponível: ${chatStoreError}. As conversas continuam no armazenamento local do navegador.` : chatStoreWarning}</p></div>}
           {errorsByConversation[active.id] && <div className="notice-banner"><span>!</span><p>{errorsByConversation[active.id]}</p><button onClick={() => setErrorsByConversation((items) => { const next = { ...items }; delete next[active.id]; return next; })}>Fechar</button></div>}
+          <div className="composer-area">
+          {showJumpToLatest && active.messages.length > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label="Voltar ao final da conversa" title="Voltar ao final da conversa"><Icon name="chevron" size={14} /><span>Mensagens recentes</span></button>}
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
-              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" aria-describedby="composer-hint" />
+              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => updateActiveDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" aria-describedby="composer-hint" />
               <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
+          </div>
           </div>
         </section>
       </main>
@@ -574,10 +606,10 @@ function App() {
             className={panel === tab ? "active" : ""}
           >{tab === "system" ? "Sistema" : tab === "ai" ? "IA" : "Projeto"}</button>)}
         </div>
-        <div id="dashboard-panel" className="dashboard-tabpanel" role="tabpanel" aria-labelledby={`dashboard-tab-${panel}`} tabIndex={0}>
+        <div id="dashboard-panel" className="dashboard-tabpanel" role="tabpanel" aria-label="Conteúdo do dashboard" aria-labelledby={`dashboard-tab-${panel}`} tabIndex={0}>
           {panel === "system" && <SystemDashboard />}
-          {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
-          {panel === "project" && <div className="dashboard-content project-empty"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
+          {panel === "ai" && <div className="dashboard-content" tabIndex={0} aria-label="Configuração do modelo e serviço"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
+          {panel === "project" && <div className="dashboard-content project-empty" tabIndex={0} aria-label="Projetos"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
         </div>
         <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>
       </aside>

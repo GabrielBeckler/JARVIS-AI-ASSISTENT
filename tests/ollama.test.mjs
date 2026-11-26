@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendAssistantOnce, captureScrollPosition, createRequestContext, isCurrentRequest, restoreConversations, restoreScrollTop, updateMessage } from "../src/chat.js";
+import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage } from "../src/chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext } from "../src/ollama.js";
 
 const emptyConversation = (id) => ({ id, title: "Nova conversa", updatedAt: 1, messages: [] });
@@ -124,4 +124,15 @@ test("follows the end only near it and restores an earlier reading position", ()
   const nearEnd = captureScrollPosition({ scrollTop: 650, scrollHeight: 1200, clientHeight: 500 });
   assert.equal(nearEnd.followBottom, true);
   assert.equal(restoreScrollTop({ scrollHeight: 1600, clientHeight: 500 }, nearEnd), 1100);
+});
+
+test("preserves separate drafts while switching conversations and clears only the sent draft", () => {
+  let drafts = {};
+  drafts = setConversationDraft(drafts, "conversation-a", "rascunho A");
+  drafts = setConversationDraft(drafts, "conversation-b", "rascunho B");
+  assert.equal(getConversationDraft(drafts, "conversation-a"), "rascunho A");
+  assert.equal(getConversationDraft(drafts, "conversation-b"), "rascunho B");
+  drafts = setConversationDraft(drafts, "conversation-a", "");
+  assert.equal(getConversationDraft(drafts, "conversation-a"), "");
+  assert.equal(getConversationDraft(drafts, "conversation-b"), "rascunho B");
 });

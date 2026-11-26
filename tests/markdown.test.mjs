@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MarkdownMessage, safeMarkdownUrl } from "../src/MarkdownMessage.js";
+import { restoreConversations } from "../src/chat.js";
 
 function render(content) {
   return renderToStaticMarkup(createElement(MarkdownMessage, { content }));
@@ -13,6 +14,14 @@ test("renders paragraphs, lists, emphasis, inline code, and fenced code", () => 
   assert.match(html, /<p>Primeiro parágrafo\.<\/p>/);
   assert.match(html, /<ul>[\s\S]*<li>item <strong>forte<\/strong><\/li>[\s\S]*<li><code>código<\/code><\/li>[\s\S]*<\/ul>/);
   assert.match(html, /<pre><code class="language-ts">const answer = 42\n<\/code><\/pre>/);
+});
+
+test("renders the Windows heading example, italics, nested lists, links, and inline code", () => {
+  const html = render("### Se você usa **Windows**\n\n*Destaque em itálico.*\n\n1. Primeiro\n   - Subitem\n   - Segundo subitem\n2. Próximo\n\n[Código](https://example.com/docs) com `inline`.");
+  assert.match(html, /<h3>Se você usa <strong>Windows<\/strong><\/h3>/);
+  assert.match(html, /<p><em>Destaque em itálico\.<\/em><\/p>/);
+  assert.match(html, /<ol>[\s\S]*<li>Primeiro\s*<ul>[\s\S]*<li>Subitem<\/li>[\s\S]*<\/ul>\s*<\/li>[\s\S]*<li>Próximo<\/li>[\s\S]*<\/ol>/);
+  assert.match(html, /<a href="https:\/\/example\.com\/docs" target="_blank" rel="noopener noreferrer">Código<\/a> com <code>inline<\/code>/);
 });
 
 test("does not parse raw HTML or create remote image elements", () => {
@@ -42,4 +51,14 @@ test("keeps unfinished streaming Markdown readable", () => {
 
 test("continues rendering plain-text messages from older conversations", () => {
   assert.equal(render("Resposta antiga sem marcação"), "<p>Resposta antiga sem marcação</p>");
+});
+
+test("keeps thousands of raw characters intact in stored history while rendering long code blocks", () => {
+  const code = "x".repeat(4_000);
+  const source = "### Código\n\n" + "```txt\n" + code + "\n```";
+  const [conversation] = restoreConversations(JSON.stringify([{ id: "long", title: "Longa", messages: [{ role: "assistant", content: source }] }]), []);
+  assert.equal(conversation.messages[0].content, source);
+  const html = render(source);
+  assert.match(html, /<h3>Código<\/h3>/);
+  assert.ok(html.includes(code));
 });

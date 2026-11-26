@@ -19,3 +19,5 @@ export function isCurrentRequest(activeRequests: Map<string, string>, conversati
 export function createRequestContext(conversationId: string, requestId: string, model: string): Readonly<{ conversationId: string; requestId: string; model: string }>;
 export function captureScrollPosition(element: { scrollTop: number; scrollHeight: number; clientHeight: number }, threshold?: number): { scrollTop: number; followBottom: boolean };
 export function restoreScrollTop(element: { scrollHeight: number; clientHeight: number }, saved?: { scrollTop: number; followBottom: boolean }): number;
+export function getConversationDraft(drafts: Readonly<Record<string, string>>, conversationId: string): string;
+export function setConversationDraft(drafts: Readonly<Record<string, string>>, conversationId: string, value: string): Record<string, string>;

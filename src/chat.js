@@ -58,3 +58,16 @@ export function restoreScrollTop(element, saved) {
   if (!saved || saved.followBottom) return Math.max(0, element.scrollHeight - element.clientHeight);
   return Math.max(0, Math.min(saved.scrollTop, element.scrollHeight - element.clientHeight));
 }
+
+/** @param {Readonly<Record<string, string>>} drafts @param {string} conversationId */
+export function getConversationDraft(drafts, conversationId) {
+  return drafts[conversationId] ?? "";
+}
+
+/** @param {Readonly<Record<string, string>>} drafts @param {string} conversationId @param {string} value */
+export function setConversationDraft(drafts, conversationId, value) {
+  const next = { ...drafts };
+  if (value) next[conversationId] = value;
+  else delete next[conversationId];
+  return next;
+}
