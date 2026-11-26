@@ -1,0 +1,14 @@
+export type LayoutWidths = { sidebarWidth: number; dashboardWidth: number };
+export type ResizableArea = "sidebar" | "dashboard";
+export const LAYOUT_STORAGE_KEY: string;
+export const SIDEBAR_MIN_WIDTH: number;
+export const SIDEBAR_MAX_WIDTH: number;
+export const DASHBOARD_MIN_WIDTH: number;
+export const DASHBOARD_MAX_WIDTH: number;
+export const CHAT_MIN_WIDTH: number;
+export const DIVIDER_WIDTH: number;
+export const defaultLayoutWidths: Readonly<LayoutWidths>;
+export function restoreLayoutWidths(saved: string | null): LayoutWidths;
+export function clampLayoutWidths(widths: LayoutWidths, containerWidth: number): LayoutWidths;
+export function resizeLayoutArea(widths: LayoutWidths, area: ResizableArea, delta: number, containerWidth: number): LayoutWidths;
+export function getLayoutLimits(widths: LayoutWidths, containerWidth: number): Record<ResizableArea, { min: number; max: number }>;

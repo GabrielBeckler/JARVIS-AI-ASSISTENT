@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
@@ -14,6 +14,7 @@ import { sanitizeExportFilename } from "./exportFilename.js";
 import { resolveConversationTitle, validateConversationTitle } from "./conversationTitle.js";
 import { getConversationShortcut } from "./conversationShortcuts.js";
 import { dropWithinSection, moveWithinSection, orderConversations, restoreSidebarPreferences, SIDEBAR_PREFERENCES_KEY, type SidebarFilter, type SidebarPreferences, type SidebarSorting } from "./sidebarPreferences.js";
+import { clampLayoutWidths, getLayoutLimits, LAYOUT_STORAGE_KEY, resizeLayoutArea, restoreLayoutWidths, type LayoutWidths, type ResizableArea } from "./layoutSizing.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -92,6 +93,9 @@ function App() {
     try { return restoreSidebarPreferences(localStorage.getItem(SIDEBAR_PREFERENCES_KEY)); } catch { return restoreSidebarPreferences(null); }
   });
   const [sidebarSettingsOpen, setSidebarSettingsOpen] = useState(false);
+  const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => {
+    try { return restoreLayoutWidths(localStorage.getItem(LAYOUT_STORAGE_KEY)); } catch { return restoreLayoutWidths(null); }
+  });
   const [panel, setPanel] = useState<Panel>("system");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [modelStatus, setModelStatus] = useState<ModelStatus>("checking");
@@ -113,6 +117,7 @@ function App() {
   const preserveLegacyCopyRef = useRef(false);
   const statusCheckRef = useRef(0);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const appShellRef = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const renameInput = useRef<HTMLInputElement>(null);
   const focusNewConversationRef = useRef(false);
@@ -215,6 +220,28 @@ function App() {
     try { localStorage.setItem(SIDEBAR_PREFERENCES_KEY, JSON.stringify(sidebarPreferences)); }
     catch { setConversationNotice("Não foi possível salvar as preferências da barra lateral neste dispositivo."); }
   }, [sidebarPreferences]);
+
+  useEffect(() => {
+    try { localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layoutWidths)); } catch { /* Keep the current session usable if local storage is unavailable. */ }
+  }, [layoutWidths]);
+
+  useEffect(() => {
+    const shell = appShellRef.current;
+    if (!shell || typeof ResizeObserver === "undefined") return;
+    const resizeToFit = () => {
+      const width = shell.clientWidth;
+      if (width < 600) return;
+      setLayoutWidths((current) => clampLayoutWidths(current, width));
+    };
+    const observer = new ResizeObserver(resizeToFit);
+    observer.observe(shell);
+    window.addEventListener("resize", resizeToFit);
+    resizeToFit();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", resizeToFit);
+    };
+  }, []);
 
   useEffect(() => {
     if (!sidebarSettingsOpen) return;
@@ -707,9 +734,39 @@ function App() {
     });
   };
 
+  const resizeFromPointer = (area: ResizableArea, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.buttons === 0) return;
+    const shell = appShellRef.current;
+    if (!shell) return;
+    event.preventDefault();
+    const bounds = shell.getBoundingClientRect();
+    const width = area === "sidebar" ? event.clientX - bounds.left : bounds.right - event.clientX;
+    setLayoutWidths((current) => clampLayoutWidths({ ...current, [area === "sidebar" ? "sidebarWidth" : "dashboardWidth"]: width }, bounds.width));
+  };
+
+  const resizeFromKeyboard = (area: ResizableArea, event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    let delta = 0;
+    if (event.key === "ArrowLeft") delta = area === "sidebar" ? -step : step;
+    else if (event.key === "ArrowRight") delta = area === "sidebar" ? step : -step;
+    else if (event.key === "Home") delta = -10000;
+    else if (event.key === "End") delta = 10000;
+    else return;
+    event.preventDefault();
+    const width = appShellRef.current?.clientWidth ?? window.innerWidth;
+    setLayoutWidths((current) => resizeLayoutArea(current, area, delta, width));
+  };
+
+  const shellWidth = appShellRef.current?.clientWidth ?? window.innerWidth;
+  const layoutLimits = getLayoutLimits(layoutWidths, shellWidth);
+  const layoutStyle = {
+    "--sidebar-width": `${layoutWidths.sidebarWidth}px`,
+    "--dashboard-width": `${layoutWidths.dashboardWidth}px`,
+  } as CSSProperties;
+
   return (
-    <div className="app-shell">
-      <aside className="left-rail" aria-label="Navegação e conversas" tabIndex={0}>
+    <div className="app-shell" ref={appShellRef} style={layoutStyle}>
+      <aside id="left-rail" className="left-rail" aria-label="Navegação e conversas" tabIndex={0}>
         <div className="brand-lockup">
           <div className="brand-mark"><Icon name="spark" size={19} /></div>
           <div><strong>JARVIS</strong><span>LOCAL INTELLIGENCE</span></div>
@@ -773,7 +830,24 @@ function App() {
         </div>
       </aside>
 
-      <main className="main-area">
+      <div
+        className="resize-divider sidebar-divider"
+        role="separator"
+        aria-label="Redimensionar barra lateral esquerda"
+        aria-orientation="vertical"
+        aria-controls="left-rail main-area"
+        aria-valuemin={layoutLimits.sidebar.min}
+        aria-valuemax={layoutLimits.sidebar.max}
+        aria-valuenow={layoutWidths.sidebarWidth}
+        aria-valuetext={`${layoutWidths.sidebarWidth} pixels`}
+        tabIndex={0}
+        onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerMove={(event) => resizeFromPointer("sidebar", event)}
+        onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        onKeyDown={(event) => resizeFromKeyboard("sidebar", event)}
+      />
+
+      <main id="main-area" className="main-area">
         <header className="topbar">
           <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong tabIndex={0} title={active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"} aria-label={active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}>{active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}</strong></div>
           <div className="topbar-actions"><div className="model-chip"><span className={`status-dot ${serviceStatus === "checking" ? "checking" : serviceStatus === "available" ? "online" : "offline"}`} />{model}<Icon name="chevron" size={13} /></div><button className="icon-button" aria-label="Mais opções"><Icon name="more" /></button><div className="top-avatar">G</div></div>
@@ -828,7 +902,24 @@ function App() {
         </section>
       </main>
 
-      <aside className="right-rail">
+      <div
+        className="resize-divider dashboard-divider"
+        role="separator"
+        aria-label="Redimensionar dashboard direito"
+        aria-orientation="vertical"
+        aria-controls="main-area right-rail"
+        aria-valuemin={layoutLimits.dashboard.min}
+        aria-valuemax={layoutLimits.dashboard.max}
+        aria-valuenow={layoutWidths.dashboardWidth}
+        aria-valuetext={`${layoutWidths.dashboardWidth} pixels`}
+        tabIndex={0}
+        onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerMove={(event) => resizeFromPointer("dashboard", event)}
+        onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        onKeyDown={(event) => resizeFromKeyboard("dashboard", event)}
+      />
+
+      <aside id="right-rail" className="right-rail">
         <div className="dashboard-head"><div><span className="section-label">CENTRAL DE CONTROLE</span><h2>Dashboard</h2></div><button className="icon-button" aria-label="Recolher painel"><Icon name="more" /></button></div>
         <div className="dashboard-tabs" role="tablist" aria-label="Painel do dashboard">
           {(dashboardTabs as Panel[]).map((tab) => <button
