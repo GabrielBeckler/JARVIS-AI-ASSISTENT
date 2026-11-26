@@ -2,7 +2,7 @@
 
 Assistente desktop local em desenvolvimento, feito com Tauri 2, React, TypeScript e Rust. O projeto tem como plataforma alvo o Fedora Linux com KDE Plasma e Wayland, com conversas realizadas por meio de um servidor Ollama local.
 
-> **Status:** protótipo inicial. Este repositório ainda não implementa toda a especificação funcional do JARVIS AI. Consulte [Estado do projeto](#estado-do-projeto) antes de contar com recursos de voz, projetos, SQLite ou monitoramento de hardware.
+> **Status:** aplicação local funcional em evolução. Chat com streaming, persistência SQLite e dashboard de métricas reais estão implementados. Voz, gestão de projetos e ferramentas de agente ainda não fazem parte do fluxo atual.
 
 ## Índice
 
@@ -28,8 +28,8 @@ O objetivo do JARVIS AI é oferecer um assistente pessoal que funcione localment
 | Aplicação desktop | Tauri 2 |
 | Interface | React 19, TypeScript e Vite |
 | Backend nativo | Rust |
-| Banco planejado | SQLite com migrations versionadas |
-| Modelo planejado | Ollama com Qwen 3.5 4B |
+| Banco local | SQLite com migration versionada e importação do histórico legado |
+| Modelo padrão | Ollama com Qwen 3.5 4B (editável na aba **IA**) |
 | Sistema alvo | Fedora 44, KDE Plasma e Wayland |
 | Hardware de referência | Intel Core i5-12450H, NVIDIA RTX 2050 4 GB e 16 GB de RAM |
 
@@ -39,30 +39,31 @@ O uso do Ollama e a execução local do modelo não exigem uma conta ou uma API 
 
 | Recurso | Estado atual |
 | --- | --- |
-| Interface desktop de três áreas | Implementada como interface inicial |
-| Chat textual com Ollama | Resposta transmitida em streaming; perguntas diretas e curtas em conversa nova usam o modo rápido quando compatível com o modelo |
-| Verificação da API local do Ollama | Implementada |
-| Histórico de conversas | Persistido no `localStorage` do WebView |
-| Configuração do endpoint e modelo | Disponível por variáveis Vite e editável na aba **IA** |
-| Monitoramento de CPU, GPU, RAM e temperaturas | Não implementado; os valores reais são mostrados como indisponíveis |
-| Cadastro, pesquisa e permissões de projetos | Não implementado |
-| Persistência SQLite e migrations | Dependência presente; ainda não conectada ao fluxo da aplicação |
+| Interface desktop de três áreas | Implementada; janela configurada para 1440×900, mínimo 1000×680 |
+| Chat textual com Ollama | Streaming pelo backend Rust; falhas são repetíveis, cancelamento descarta a resposta tardia e respostas parciais ficam marcadas como incompletas |
+| Verificação da API local do Ollama | Estado do serviço separado do estado do modelo |
+| Histórico de conversas | SQLite no diretório de dados Tauri; importa uma vez a chave legada `jarvis.conversations` e mantém a cópia de compatibilidade |
+| Configuração do endpoint e modelo | Endereço configurável por Vite em loopback; modelo e permanência ajustáveis na aba **IA** |
+| Monitoramento de CPU, GPU, RAM e temperaturas | Coleta local independente por campo; sensores indisponíveis aparecem como N/D |
+| Renderização de respostas | Markdown sem HTML bruto nem imagens remotas automáticas; links são filtrados |
+| Cadastro, pesquisa e permissões de projetos | Gestão de projetos ainda não implementada; a busca atual pesquisa títulos de conversas |
 | Wake word, captura, STT e TTS | Não implementados; o botão de microfone está indisponível |
 | Empacotamento e validação do RPM | Ainda não validados |
 
-Os indicadores visuais do painel não representam leituras reais. O estado de chat e as conversas guardadas no `localStorage` não são compartilhados com SQLite e podem não ser preservados se os dados do WebView forem removidos.
+O SQLite é a fonte persistente principal depois da inicialização. Conversas antigas em `localStorage` são importadas em uma transação e a chave original não é removida. Os dados do dashboard são leituras da máquina atual, não um inventário fixo de hardware.
 
 ## Arquitetura atual
 
 ```mermaid
 flowchart LR
-    UI[React no WebView] -->|HTTP local| API[Ollama em 127.0.0.1:11434]
-    UI -->|histórico atual| LS[localStorage do WebView]
-    R[Rust / Tauri 2] -. integração nativa planejada .-> DB[(SQLite)]
-    R -. integração futura .-> HW[Sensores e áudio do Fedora]
+    UI[React no WebView] -->|comandos e streaming| R[Rust / Tauri 2]
+    R -->|HTTP loopback| API[Ollama local]
+    R -->|transações curtas| DB[(SQLite em app_data_dir)]
+    UI -. cópia de compatibilidade/importação única .-> LS[localStorage]
+    R -->|/proc, sysfs, hwmon e ferramentas locais| HW[Métricas do sistema]
 ```
 
-Atualmente, o chat no frontend chama os endpoints `/api/tags` e `/api/chat` do Ollama. O endpoint e o modelo padrão são fornecidos pelas variáveis de ambiente documentadas abaixo. O plugin SQL está listado no projeto Tauri, mas o aplicativo ainda não cria tabelas nem lê ou grava conversas em SQLite.
+O React usa comandos Tauri assíncronos para consultar modelos e enviar chat. O stream NDJSON é analisado incrementalmente em Rust e encaminhado ao React por canal Tauri. As conversas são persistidas no arquivo `jarvis.db` dentro do diretório de dados do aplicativo. O dashboard chama uma coleta nativa a cada dois segundos enquanto a aba Sistema está ativa.
 
 ## Requisitos
 
@@ -145,17 +146,9 @@ Confira a API local:
 curl http://127.0.0.1:11434/api/tags
 ```
 
-### Acesso CORS do WebView
+### Comunicação local com o Ollama
 
-Como a interface chama o Ollama pelo WebView, o servidor pode precisar autorizar a origem da aplicação. Para desenvolvimento, isso normalmente inclui `http://localhost:1420`; no aplicativo empacotado, o Tauri usa uma origem local como `tauri://localhost`. O Ollama permite configurar origens adicionais com `OLLAMA_ORIGINS`.
-
-Se o chat indicar erro de conexão por CORS, configure somente as origens locais necessárias no serviço Ollama. Por exemplo, para uma execução manual:
-
-```bash
-OLLAMA_ORIGINS=tauri://localhost,http://localhost:1420 ollama serve
-```
-
-Se o Ollama já estiver rodando como serviço systemd, configure a variável em um override do serviço e reinicie-o conforme a [documentação do Ollama para Linux](https://docs.ollama.com/faq#how-do-i-configure-ollama-server). Não altere o endereço de escuta para `0.0.0.0` para resolver CORS: isso pode expor a API na rede. Mantenha o serviço vinculado a loopback.
+O React chama comandos assíncronos Tauri; o backend Rust faz as requisições para o endereço configurado, que deve ser HTTP em loopback (`localhost` ou `127.0.0.1`). Assim, o WebView não acessa a API do Ollama diretamente e não precisa de configuração CORS. O backend rejeita endereços remotos. Mantenha o Ollama vinculado a loopback; não exponha a API em `0.0.0.0`.
 
 ## Execução e build
 
@@ -170,12 +163,12 @@ O suporte a RPM aparece como meta na especificação do produto, mas a configura
 
 ## Privacidade e segurança
 
-- No fluxo atual, as mensagens do chat são enviadas ao endereço de Ollama configurado e o histórico fica no armazenamento local do WebView.
+- As mensagens são enviadas pelo backend Rust ao Ollama local. O histórico principal fica em SQLite no diretório de dados do aplicativo Tauri (`jarvis.db`); a chave `jarvis.conversations` do WebView é mantida como cópia de compatibilidade e fonte da importação legada.
 - O padrão aponta para loopback (`127.0.0.1`); não configure um servidor remoto se quiser manter o processamento nesta máquina.
 - O download inicial do Ollama e do modelo requer internet. Este protótipo não chama uma API comercial.
 - O app não captura áudio atualmente. Não há gravação de áudio ou transcrição implementada.
 - `.env.local` pode conter configurações locais; nunca adicione arquivos `.env` ao Git. O `.env.example` deve conter somente valores públicos e genéricos.
-- Recursos como permissões por projeto, confirmação de ações, migrations SQLite e log de operações continuam pendentes e não devem ser considerados garantias do protótipo.
+- Permissões por projeto, confirmação de ações do agente e recursos de voz ainda não existem. A coleta de temperatura e estatísticas da GPU depende do driver e dos sensores disponíveis; velocidade da RAM pode não estar acessível sem uma fonte EDAC/SMBIOS legível.
 
 ## Estrutura do repositório
 
@@ -193,12 +186,11 @@ O suporte a RPM aparece como meta na especificação do produto, mas a configura
 
 O plano de trabalho segue a especificação funcional do JARVIS AI:
 
-1. **Fundação:** chat local, configuração, persistência SQLite e migrations.
-2. **Projetos:** cadastro e gestão de workspaces, pesquisa e associação ao histórico.
-3. **Dashboard:** leitura de sensores do Fedora e métricas reais da geração.
-4. **Voz:** detecção de palavra de ativação, VAD, transcrição e síntese locais.
-5. **Contexto e memória:** indexação autorizada de arquivos e memória controlável.
-6. **Agente:** ferramentas locais supervisionadas e registro das operações.
+1. **Fundação:** chat local, streaming, configuração, histórico SQLite e métricas de hardware implementados; estabilização e empacotamento RPM pendentes.
+2. **Projetos:** cadastro e gestão de workspaces, busca de conteúdo e associação ao histórico.
+3. **Voz:** detecção de palavra de ativação, VAD, transcrição e síntese locais.
+4. **Contexto e memória:** indexação autorizada de arquivos e memória controlável.
+5. **Agente:** ferramentas locais supervisionadas e registro das operações.
 
 ## Referências oficiais
 
@@ -207,7 +199,7 @@ As referências abaixo documentam as ferramentas, os requisitos e a sintaxe usad
 - **Microsoft Learn:** [README e Wiki de projetos no Azure DevOps](https://learn.microsoft.com/en-us/azure/devops/project/wiki/about-readme-wiki) — documentação de README e wiki para projetos.
 - **GitHub Docs (Microsoft):** [Formatação básica de Markdown](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax) — títulos, links, listas e blocos de código.
 - **Tauri:** [Pré-requisitos para Linux e Fedora](https://v2.tauri.app/start/prerequisites/) e [configuração](https://v2.tauri.app/reference/config/).
-- **Ollama:** [API de chat](https://docs.ollama.com/api/chat), [FAQ local, CORS e configuração](https://docs.ollama.com/faq) e [biblioteca Qwen 3.5 4B](https://ollama.com/library/qwen3.5:4b).
+- **Ollama:** [API de chat](https://docs.ollama.com/api/chat), [FAQ e configuração local](https://docs.ollama.com/faq) e [biblioteca Qwen 3.5 4B](https://ollama.com/library/qwen3.5:4b).
 - **Rust:** [Instalação oficial](https://doc.rust-lang.org/book/ch01-01-installation.html).
 - **React:** [Documentação oficial](https://react.dev/learn).
 - **Vite:** [Guia de início e requisitos do Node.js](https://vite.dev/guide/).

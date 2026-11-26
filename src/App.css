@@ -176,6 +176,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .dashboard-tabs { display: grid; height: 42px; flex: 0 0 42px; grid-template-columns: repeat(3,1fr); gap: 2px; padding: 6px 14px 0; border-bottom: 1px solid #23242a; }
 .dashboard-tabs button { position: relative; padding: 0 5px 8px; border: 0; border-radius: 4px 4px 0 0; background: transparent; color: #858590; cursor: pointer; font-size: 10px; transition: color .16s; }
 .dashboard-tabs button:hover { color: #d7d2e5; }.dashboard-tabs button.active { color: #c9b8ff; }.dashboard-tabs button.active::after { position: absolute; right: 14px; bottom: -1px; left: 14px; height: 2px; border-radius: 2px; background: #a78bf6; content: ''; box-shadow: 0 0 10px #a78bf666; }
+.dashboard-tabpanel { display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .dashboard-content { flex: 1; overflow: auto; padding: 17px 16px 58px; scrollbar-color: #34343d transparent; scrollbar-width: thin; }
 .system-summary { display: flex; align-items: center; gap: 9px; margin: 0 0 13px; }
 .summary-icon { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid #34303f; border-radius: 8px; background: #201d27; color: #b59bff; }

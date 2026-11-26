@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Row, sqlite::SqlitePool};
-use std::collections::HashSet;
+use std::{collections::HashSet, future::Future, time::Duration};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_sql::{DbInstances, DbPool};
 
@@ -142,7 +142,9 @@ pub async fn initialize_chat_store(
     let pool = app_pool(app, database_url).await?;
     let runtime = tokio::runtime::Handle::current();
     tauri::async_runtime::spawn_blocking(move || {
-        runtime.block_on(initialize_pool(&pool, legacy_json.as_deref()))
+        runtime.block_on(retry_sqlite_busy(|| {
+            initialize_pool(&pool, legacy_json.as_deref())
+        }))
     })
     .await
     .map_err(|error| format!("Falha na inicialização do SQLite: {error}"))?
@@ -156,9 +158,32 @@ pub async fn save_chat_store(
 ) -> Result<(), String> {
     let pool = app_pool(app, database_url).await?;
     let runtime = tokio::runtime::Handle::current();
-    tauri::async_runtime::spawn_blocking(move || runtime.block_on(save_pool(&pool, &conversations)))
-        .await
-        .map_err(|error| format!("Falha ao gravar no SQLite: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.block_on(retry_sqlite_busy(|| save_pool(&pool, &conversations)))
+    })
+    .await
+    .map_err(|error| format!("Falha ao gravar no SQLite: {error}"))?
+}
+
+async fn retry_sqlite_busy<T, F, Fut>(mut operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    const MAX_RETRIES: usize = 5;
+    for attempt in 0..=MAX_RETRIES {
+        match operation().await {
+            Err(error)
+                if attempt < MAX_RETRIES
+                    && (error.to_ascii_lowercase().contains("database is locked")
+                        || error.to_ascii_lowercase().contains("database is busy")) =>
+            {
+                tokio::time::sleep(Duration::from_millis(50 * (1 << attempt))).await;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the bounded retry loop always returns the final database result")
 }
 
 async fn app_pool(app: AppHandle, database_url: String) -> Result<SqlitePool, String> {
@@ -712,5 +737,65 @@ mod tests {
         assert_eq!(loaded, vec![saved]);
         reopened_again.close().await;
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn retries_a_transient_lock_from_another_application_instance() {
+        let path: PathBuf = std::env::temp_dir().join(format!(
+            "jarvis-chat-lock-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_millis(10));
+        let first = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        ensure_schema(&first).await.unwrap();
+        let second = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+
+        let mut blocker = first.begin().await.unwrap();
+        sqlx::query("INSERT INTO app_metadata (key, value) VALUES ('lock-test', 'held')")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            blocker.commit().await.unwrap();
+        });
+        let conversation = ChatConversation {
+            id: "lock-retry".into(),
+            title: Some("Lock retry".into()),
+            updated_at: Some(1),
+            messages: vec![],
+        };
+
+        retry_sqlite_busy(|| save_pool(&second, std::slice::from_ref(&conversation)))
+            .await
+            .expect("a transient SQLite lock should be retried");
+        release.await.unwrap();
+        assert_eq!(
+            load_pool(&second).await.unwrap(),
+            vec![conversation],
+            "retry must save the transaction exactly once"
+        );
+
+        first.close().await;
+        second.close().await;
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
     }
 }

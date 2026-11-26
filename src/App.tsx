@@ -5,6 +5,7 @@ import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaC
 import { MarkdownMessage } from "./MarkdownMessage.js";
 import { SystemDashboard } from "./SystemDashboard";
 import { initializeChatStore, persistChatStore } from "./chatStore";
+import { dashboardTabs, nextDashboardTab } from "./dashboardTabs.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -473,12 +474,31 @@ function App() {
 
       <aside className="right-rail">
         <div className="dashboard-head"><div><span className="section-label">CENTRAL DE CONTROLE</span><h2>Dashboard</h2></div><button className="icon-button" aria-label="Recolher painel"><Icon name="more" /></button></div>
-        <div className="dashboard-tabs" role="tablist">
-          {(["system", "ai", "project"] as Panel[]).map((tab) => <button key={tab} role="tab" aria-selected={panel === tab} onClick={() => setPanel(tab)} className={panel === tab ? "active" : ""}>{tab === "system" ? "Sistema" : tab === "ai" ? "IA" : "Projeto"}</button>)}
+        <div className="dashboard-tabs" role="tablist" aria-label="Painel do dashboard">
+          {(dashboardTabs as Panel[]).map((tab) => <button
+            key={tab}
+            id={`dashboard-tab-${tab}`}
+            type="button"
+            role="tab"
+            aria-selected={panel === tab}
+            aria-controls="dashboard-panel"
+            tabIndex={panel === tab ? 0 : -1}
+            onClick={() => setPanel(tab)}
+            onKeyDown={(event) => {
+              const nextTab = nextDashboardTab(tab, event.key);
+              if (nextTab == null) return;
+              event.preventDefault();
+              setPanel(nextTab);
+              document.getElementById(`dashboard-tab-${nextTab}`)?.focus();
+            }}
+            className={panel === tab ? "active" : ""}
+          >{tab === "system" ? "Sistema" : tab === "ai" ? "IA" : "Projeto"}</button>)}
         </div>
-        {panel === "system" && <SystemDashboard />}
-        {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
-        {panel === "project" && <div className="dashboard-content project-empty"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
+        <div id="dashboard-panel" className="dashboard-tabpanel" role="tabpanel" aria-labelledby={`dashboard-tab-${panel}`} tabIndex={0}>
+          {panel === "system" && <SystemDashboard />}
+          {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
+          {panel === "project" && <div className="dashboard-content project-empty"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
+        </div>
         <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>
       </aside>
     </div>
