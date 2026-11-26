@@ -47,13 +47,17 @@ export function limitChatContext(messages, maxChars = 10000) {
 }
 
 /** @param {string} prompt @param {boolean} [hasHistory] */
-export function shouldUseFastMode(prompt, hasHistory = false) {
+export function shouldUseFastMode(prompt, _hasHistory = false) {
   const text = prompt.trim();
-  if (!text || hasHistory || text.length > 120) return false;
+  if (!text || text.length > 120) return false;
   if (/\b(why|por que|por quê|explique|explain|analise|analyze|compare|justifique|justify|demonstre|prove|passo a passo|step by step|código|code|debug|resolva|solve|planeje|plan|resuma|summari[sz]e|detalhe|detail|crie|create|escreva|write|gere|generate)\b/i.test(text)) return false;
 
   const explicitBrevity = /\b(apenas|somente|só|responda (?:curto|brevemente)|em uma frase|just|only|briefly)\b/i.test(text);
-  const directQuestion = /\?$/.test(text) && /^(?:o que|qual|quem|onde|quando|quanto|tem|existe|é|what|which|who|where|when|how much|is there|does)\b/i.test(text);
+  const directQuestion = /\?$/.test(text) && /^(?:o que|qual|quem|onde|quando|quanto|tem|existe|é|como está|what|which|who|where|when|how much|is there|does|how is)(?:\s|$)/iu.test(text);
+  const systemFollowUp = /^(?:e\s+)?(?:a|o|os|as)?\s*(?:temperatura|uso|desempenho|performance|cpu|processador|gpu|placa de v[ií]deo|ram|mem[oó]ria|vram|modelo)\b[^\n]{0,80}\??$/i.test(text);
   const greeting = /^(?:oi|olá|ola|bom dia|boa tarde|boa noite|hi|hello|hey)[!.?]*$/i.test(text);
-  return explicitBrevity || directQuestion || greeting;
+  const simplePrompt = explicitBrevity || directQuestion || systemFollowUp || greeting;
+  // Conversation history remains in the payload; `think:false` only skips hidden
+  // reasoning for short, direct prompts where that reasoning caused long waits.
+  return simplePrompt;
 }

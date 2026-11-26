@@ -105,7 +105,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .composer-wrap { z-index: 1; width: min(680px, calc(100% - 48px)); flex: 0 0 auto; padding: 10px 0 15px; }
 .composer { padding: 10px 10px 8px 15px; border: 1px solid #34323d; border-radius: 11px; background: #19191e; box-shadow: 0 12px 45px #00000036,0 1px 0 #ffffff05 inset; transition: border .2s,box-shadow .2s; }
 .composer:focus-within { border-color: #665788; box-shadow: 0 0 0 3px #a48bfa10,0 12px 45px #00000036; }
-.composer textarea { display: block; width: 100%; min-height: 27px; max-height: 160px; resize: none; padding: 2px 1px 6px; border: 0; outline: none; background: transparent; color: #eeeaf7; font-size: 12px; line-height: 1.55; }
+.composer textarea { display: block; width: 100%; min-height: 27px; max-height: 194px; overflow-x: hidden; overflow-y: hidden; resize: none; padding: 2px 1px 6px; border: 0; outline: none; background: transparent; color: #eeeaf7; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .composer textarea::placeholder { color: #777681; }
 .composer-bottom, .composer-tools { display: flex; align-items: center; }
 .composer-bottom { justify-content: space-between; }
@@ -153,6 +153,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .assistant-markdown a:focus-visible { border-radius: 2px; outline: 2px solid #b49fff; outline-offset: 3px; }
 .markdown-link-blocked { color: #a4a0ae; text-decoration: underline dotted; text-decoration-color: #77717f; }
 .response-metrics { margin-top: 6px; color: #777984; font: 8px 'DM Mono',monospace; line-height: 1.5; }
+.message-actions { display: flex; min-height: 25px; align-items: center; gap: 8px; margin-top: 5px; }
+.copy-response { display: inline-flex; min-height: 25px; align-items: center; gap: 6px; padding: 3px 7px; border: 1px solid #34323d; border-radius: 5px; background: #19191e; color: #a6a1b2; cursor: pointer; font-size: 9px; }
+.copy-response:hover { border-color: #665788; background: #211e29; color: #ded4f7; }
+.copy-feedback { color: #8fc8a7; font-size: 9px; }
+.copy-feedback.failed { color: #e3a5a8; }
 .message-failure-label { margin-top: 5px; color: #d18b8e; font-size: 9px; }
 .retry-message { margin-top: 7px; padding: 4px 8px; border: 1px solid #543a3c; border-radius: 5px; background: #291d1e; color: #e0a1a4; cursor: pointer; font-size: 9px; }
 .retry-message:hover { border-color: #8a5458; background: #352124; }

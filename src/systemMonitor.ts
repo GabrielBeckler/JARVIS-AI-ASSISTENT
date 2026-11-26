@@ -33,6 +33,15 @@ export type SystemSnapshot = {
   };
 };
 
+let pendingSnapshot: Promise<SystemSnapshot> | null = null;
+
 export function getSystemSnapshot(): Promise<SystemSnapshot> {
-  return invoke<SystemSnapshot>("system_snapshot");
+  if (!pendingSnapshot) {
+    const request = invoke<SystemSnapshot>("system_snapshot");
+    const shared = request.finally(() => {
+      if (pendingSnapshot === shared) pendingSnapshot = null;
+    });
+    pendingSnapshot = shared;
+  }
+  return pendingSnapshot;
 }

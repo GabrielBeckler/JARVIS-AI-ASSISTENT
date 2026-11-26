@@ -40,12 +40,16 @@ test("limits request context to recent complete turns while preserving system in
   assert.deepEqual(limitChatContext(messages, 1).slice(-1), [messages.at(-1)]);
 });
 
-test("uses fast mode only for short direct prompts without history", () => {
+test("uses fast mode for short direct prompts and system follow-ups with or without history", () => {
   assert.equal(shouldUseFastMode("Quanto é 2 + 2?"), true);
   assert.equal(shouldUseFastMode("Responda apenas com OK."), true);
   assert.equal(shouldUseFastMode("Olá"), true);
+  assert.equal(shouldUseFastMode("Como está o desempenho do meu computador?", true), true);
+  assert.equal(shouldUseFastMode("E a temperatura?", true), true);
+  assert.equal(shouldUseFastMode("Qual é o modelo da minha GPU?", true), true);
   assert.equal(shouldUseFastMode("Explique por que o céu é azul?"), false);
-  assert.equal(shouldUseFastMode("Quanto é 2 + 2?", true), false);
+  assert.equal(shouldUseFastMode("Explique por que o céu é azul?", true), false);
+  assert.equal(shouldUseFastMode("Crie um plano detalhado.", true), false);
 });
 
 test("restores legacy history, marks interrupted sends retryable, and leaves old metadata unknown", () => {

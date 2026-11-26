@@ -6,6 +6,10 @@ import { MarkdownMessage } from "./MarkdownMessage.js";
 import { SystemDashboard } from "./SystemDashboard";
 import { initializeChatStore, persistChatStore } from "./chatStore";
 import { dashboardTabs, nextDashboardTab } from "./dashboardTabs.js";
+import { getSystemSnapshot } from "./systemMonitor";
+import { createSystemContextPrompt, isSystemQuestion } from "./systemContext.js";
+import { calculateComposerSize } from "./composerSizing.js";
+import { copyResponseText } from "./clipboard.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -15,6 +19,7 @@ type ServiceStatus = "checking" | "available" | "unavailable";
 type ModelStatus = "checking" | "missing" | "ready" | "unknown";
 type ChatStoreStatus = "checking" | "ready" | "failed";
 type StreamState = { requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
+type CopyFeedback = { label: string; failed: boolean };
 
 function durationLabel(milliseconds: number | null | undefined): string {
   return milliseconds == null || !Number.isFinite(milliseconds) ? "N/D" : `${(milliseconds / 1000).toFixed(1)} s`;
@@ -46,6 +51,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     chevron: <path d="m9 18 6-6-6-6" />,
     more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
     stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+    copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] ?? paths.spark}</svg>;
 }
@@ -84,6 +90,7 @@ function App() {
   const [activeRequests, setActiveRequests] = useState<Record<string, string>>({});
   const [streamingByConversation, setStreamingByConversation] = useState<Record<string, StreamState>>({});
   const [errorsByConversation, setErrorsByConversation] = useState<Record<string, string>>({});
+  const [copyFeedbackByKey, setCopyFeedbackByKey] = useState<Record<string, CopyFeedback>>({});
   const [clockNow, setClockNow] = useState(0);
   const [statusError, setStatusError] = useState("");
   const activeRequestsRef = useRef(new Map<string, string>());
@@ -93,6 +100,7 @@ function App() {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
+  const copyFeedbackTimersRef = useRef(new Map<string, number>());
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const recent = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
   const activeRequestId = activeRequests[active.id];
@@ -168,6 +176,11 @@ function App() {
     return () => window.clearInterval(timer);
   }, [activeRequests]);
 
+  useEffect(() => () => {
+    for (const timer of copyFeedbackTimersRef.current.values()) window.clearTimeout(timer);
+    copyFeedbackTimersRef.current.clear();
+  }, []);
+
   useLayoutEffect(() => {
     const list = messageListRef.current;
     if (!list) return;
@@ -179,6 +192,38 @@ function App() {
     const list = messageListRef.current;
     if (list) scrollPositionsRef.current.set(active.id, captureScrollPosition(list));
   };
+
+  const resizeComposerTextarea = useCallback(() => {
+    const field = textarea.current;
+    if (!field) return;
+    const computed = window.getComputedStyle(field);
+    const fontSize = Number.parseFloat(computed.fontSize) || 12;
+    const lineHeight = Number.parseFloat(computed.lineHeight) || fontSize * 1.55;
+    const paddingTop = Number.parseFloat(computed.paddingTop) || 0;
+    const paddingBottom = Number.parseFloat(computed.paddingBottom) || 0;
+    field.style.height = "auto";
+    const size = calculateComposerSize(field.scrollHeight, lineHeight, paddingTop, paddingBottom);
+    field.style.maxHeight = `${size.maxHeight}px`;
+    field.style.height = `${size.height}px`;
+    field.style.overflowY = size.overflowY;
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeComposerTextarea();
+  }, [draft, resizeComposerTextarea]);
+
+  useEffect(() => {
+    const field = textarea.current;
+    if (!field || typeof ResizeObserver === "undefined") return;
+    let observedWidth = field.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (field.clientWidth === observedWidth) return;
+      observedWidth = field.clientWidth;
+      resizeComposerTextarea();
+    });
+    observer.observe(field);
+    return () => observer.disconnect();
+  }, [resizeComposerTextarea]);
 
   useLayoutEffect(() => {
     for (const [conversationId, stream] of Object.entries(streamingByConversation)) {
@@ -234,6 +279,25 @@ function App() {
     textarea.current?.focus();
   };
 
+  const copyResponse = async (key: string, content: string) => {
+    const previousTimer = copyFeedbackTimersRef.current.get(key);
+    if (previousTimer != null) window.clearTimeout(previousTimer);
+    setCopyFeedbackByKey((items) => ({ ...items, [key]: { label: "Copiando…", failed: false } }));
+    let feedback: CopyFeedback;
+    try {
+      await copyResponseText(content);
+      feedback = { label: "Copiado!", failed: false };
+    } catch {
+      feedback = { label: "Falha ao copiar", failed: true };
+    }
+    setCopyFeedbackByKey((items) => ({ ...items, [key]: feedback }));
+    const timer = window.setTimeout(() => {
+      copyFeedbackTimersRef.current.delete(key);
+      setCopyFeedbackByKey((items) => { const next = { ...items }; delete next[key]; return next; });
+    }, 2_000);
+    copyFeedbackTimersRef.current.set(key, timer);
+  };
+
   const setRequestState = (conversationId: string, requestId: string | null) => {
     if (requestId) activeRequestsRef.current.set(conversationId, requestId);
     else activeRequestsRef.current.delete(conversationId);
@@ -260,7 +324,8 @@ function App() {
     const requestContext = createRequestContext(conversation.id, crypto.randomUUID(), model);
     const { conversationId, requestId, model: requestedModel } = requestContext;
     const history = toChatContext(conversation.messages.filter((message) => message.id !== retrying?.id));
-    const requestMessages = limitChatContext([...history, { role: "user" as const, content }]);
+    const currentQuestion: StoredMessage = { role: "user", content };
+    const needsSystemContext = isSystemQuestion(content, history);
     const now = Date.now();
     const startedAt = performance.now();
     scrollPositionsRef.current.set(conversationId, { scrollTop: 0, followBottom: true });
@@ -295,6 +360,17 @@ function App() {
     }));
 
     try {
+      let systemContext: StoredMessage[] = [];
+      if (needsSystemContext) {
+        try {
+          const snapshot = await getSystemSnapshot();
+          systemContext = [{ role: "system", content: createSystemContextPrompt(content, snapshot) }];
+        } catch {
+          systemContext = [{ role: "system", content: createSystemContextPrompt(content, null, { collectionFailed: true }) }];
+        }
+      }
+      if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+      const requestMessages = limitChatContext([...systemContext, ...history, currentQuestion]);
       const request = streamOllamaChat(
         ollamaBaseUrl,
         requestedModel,
@@ -451,12 +527,16 @@ function App() {
                 <div className="message-content">
                   <div className="message-author"><span className="message-author-name">{message.role === "user" ? "Você" : "Jarvis"}</span><span>{message.model ?? "Modelo desconhecido"} · {messageTime(message.createdAt)}</span></div>
                   {message.role === "assistant" ? <div className="assistant-markdown"><MarkdownMessage content={message.content} /></div> : <p>{message.content}</p>}
+                  {message.role === "assistant" && <div className="message-actions">
+                    <button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(message.requestId ?? message.id ?? `${active.id}-${index}`, message.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>
+                    {copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`] && <span className={`copy-feedback ${copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "failed" : ""}`} role={copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].label}</span>}
+                  </div>}
                   {message.delivery === "failed" && <div className="message-failure-label">{message.role === "assistant" ? "Resposta interrompida · não será enviada no próximo contexto" : "Envio falhou · pergunta preservada"}</div>}
                   {message.role === "assistant" && message.metrics && <div className="response-metrics">Primeiro texto: {durationLabel(message.metrics.firstContentMs)} · Total: {durationLabel(message.metrics.totalElapsedMs)} · Ollama: {durationLabel(message.metrics.ollamaTotalMs)} · Velocidade: {message.metrics.tokensPerSecond == null ? "N/D" : `${message.metrics.tokensPerSecond.toFixed(1)} tok/s`}</div>}
                   {message.role === "user" && message.delivery === "failed" && <button className="retry-message" onClick={() => void sendMessage(undefined, message.id)} disabled={Boolean(activeRequestId)}>Tentar novamente</button>}
                 </div>
               </article>)}
-              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Jarvis</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : <div className="typing-indicator"><i /><i /><i /></div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
+              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Jarvis</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : <div className="typing-indicator"><i /><i /><i /></div>}{activeStream.content && <div className="message-actions"><button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(activeStream.requestId, activeStream.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>{copyFeedbackByKey[activeStream.requestId] && <span className={`copy-feedback ${copyFeedbackByKey[activeStream.requestId].failed ? "failed" : ""}`} role={copyFeedbackByKey[activeStream.requestId].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[activeStream.requestId].label}</span>}</div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
               <div className="message-end" />
             </div>
           )}
@@ -464,8 +544,8 @@ function App() {
           {errorsByConversation[active.id] && <div className="notice-banner"><span>!</span><p>{errorsByConversation[active.id]}</p><button onClick={() => setErrorsByConversation((items) => { const next = { ...items }; delete next[active.id]; return next; })}>Fechar</button></div>}
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
-              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" />
-              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
+              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" aria-describedby="composer-hint" />
+              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
           </div>
