@@ -78,3 +78,20 @@ export function renameConversationTitle(conversations, conversationId, title, up
     ? { ...conversation, title, updatedAt }
     : conversation);
 }
+
+/** @param {Array<{id: string, pinned?: boolean, archived?: boolean}>} conversations @param {string} conversationId @param {{pinned?: boolean, archived?: boolean}} changes */
+export function updateConversationFlags(conversations, conversationId, changes) {
+  return conversations.map((conversation) => conversation.id === conversationId ? { ...conversation, ...changes } : conversation);
+}
+
+/** @param {Array<{id: string}>} conversations @param {string} conversationId */
+export function removeConversation(conversations, conversationId) {
+  return conversations.filter((conversation) => conversation.id !== conversationId);
+}
+
+/** Export original text with role labels; Markdown formatting remains intact. @param {{title?: string, messages: Array<{role: string, content: string}>}} conversation */
+export function exportConversationMarkdown(conversation) {
+  const title = conversation.title?.trim() || "Conversa sem título";
+  const messages = conversation.messages.filter((message) => message.role === "user" || message.role === "assistant");
+  return `# ${title}\n\n${messages.map((message) => `## ${message.role === "user" ? "Você" : "JARVIS"}\n\n${message.content}`).join("\n\n---\n\n")}\n`;
+}

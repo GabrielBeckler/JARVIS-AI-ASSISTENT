@@ -1,10 +1,10 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage, type StoredConversation } from "./chat.js";
+import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import { MarkdownMessage } from "./MarkdownMessage.js";
 import { SystemDashboard } from "./SystemDashboard";
-import { initializeChatStore, persistChatStore } from "./chatStore";
+import { exportMarkdownFile, initializeChatStore, persistChatStore } from "./chatStore";
 import { dashboardTabs, nextDashboardTab } from "./dashboardTabs.js";
 import { getSystemSnapshot } from "./systemMonitor";
 import { createSystemContextPrompt, isSystemQuestion } from "./systemContext.js";
@@ -83,6 +83,9 @@ function App() {
   const [draftsByConversation, setDraftsByConversation] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
+  const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
+  const [deleteDialogId, setDeleteDialogId] = useState<string | null>(null);
+  const [conversationNotice, setConversationNotice] = useState("");
   const [panel, setPanel] = useState<Panel>("system");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [modelStatus, setModelStatus] = useState<ModelStatus>("checking");
@@ -113,7 +116,10 @@ function App() {
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const draft = getConversationDraft(draftsByConversation, active.id);
   const renameValidation = renameDialog ? validateConversationTitle(renameDialog.value) : null;
-  const recent = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
+  const matching = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
+  const pinnedConversations = matching.filter((conversation) => conversation.pinned && !conversation.archived);
+  const archivedConversations = matching.filter((conversation) => conversation.archived);
+  const recent = matching.filter((conversation) => !conversation.pinned && !conversation.archived);
   const activeRequestId = activeRequests[active.id];
   const activeStream = streamingByConversation[active.id];
   const syncScrollPosition = useCallback((conversationId: string, list: HTMLDivElement) => {
@@ -213,6 +219,36 @@ function App() {
   useEffect(() => {
     if (renameDialog) renameInput.current?.focus();
   }, [renameDialog?.conversationId]);
+
+  useEffect(() => {
+    if (!deleteDialogId) return;
+    document.querySelector<HTMLButtonElement>('[role="alertdialog"] button')?.focus();
+  }, [deleteDialogId]);
+
+  useEffect(() => {
+    if (!conversationMenuId) return;
+    const menu = document.querySelector<HTMLElement>('[role="menu"]');
+    menu?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menu?.contains(event.target)) setConversationMenuId(null);
+    };
+    const moveMenuFocus = (event: KeyboardEvent) => {
+      if (!menu || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)'));
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+      event.preventDefault();
+      items[index].focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", moveMenuFocus);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", moveMenuFocus);
+    };
+  }, [conversationMenuId]);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -363,6 +399,45 @@ function App() {
     const updatedAt = Date.now();
     setConversations((items) => renameConversationTitle(items, renameDialog.conversationId, validation.value, updatedAt));
     setRenameDialog(null);
+  };
+
+  const updateFlags = (conversation: Conversation, changes: { pinned?: boolean; archived?: boolean }) => {
+    setConversations((items) => updateConversationFlags(items, conversation.id, changes));
+    setConversationMenuId(null);
+    if (changes.archived && conversation.id === activeId) {
+      const next = conversations.find((item) => item.id !== conversation.id && !item.archived);
+      if (next) setActiveId(next.id);
+      else newConversation();
+    }
+  };
+
+  const confirmDeleteConversation = () => {
+    if (!deleteDialogId) return;
+    const id = deleteDialogId;
+    const next = conversations.find((item) => item.id !== id && !item.archived);
+    setConversations((items) => removeConversation(items, id));
+    if (activeId === id) {
+      if (next) setActiveId(next.id);
+      else newConversation();
+    }
+    setDeleteDialogId(null);
+  };
+
+  const shareConversation = async (conversation: Conversation, mode: "copy" | "export") => {
+    const markdown = exportConversationMarkdown(conversation);
+    try {
+      if (mode === "copy") {
+        await copyResponseText(markdown);
+        setConversationNotice("Conversa copiada para a área de transferência.");
+      } else {
+        const safeName = (conversation.title || "conversa").replace(/[\\/:*?\"<>|]/gu, "-").slice(0, 100);
+        const saved = await exportMarkdownFile(`${safeName || "conversa"}.md`, markdown);
+        setConversationNotice(saved ? "Conversa exportada em Markdown." : "Exportação cancelada.");
+      }
+    } catch {
+      setConversationNotice(mode === "copy" ? "Não foi possível copiar a conversa." : "Não foi possível exportar a conversa.");
+    }
+    setConversationMenuId(null);
   };
 
   const updateActiveDraft = (value: string) => {
@@ -577,16 +652,28 @@ function App() {
           <button className="nav-item"><span className="nav-icon"><Icon name="chat" size={16} /></span><span>Conversas</span></button>
         </div>
         <div className="sidebar-section recent-section">
-          <div className="section-label">RECENTES <button aria-label="Ordenar conversas"><Icon name="more" size={16} /></button></div>
-          {recent.length ? recent.slice(0, 8).map((conversation) => {
+          {conversationNotice && <p className="conversation-notice" role="status" aria-live="polite">{conversationNotice}</p>}
+          {([ ["FIXADAS", pinnedConversations], ["RECENTES", recent], ["ARQUIVADAS", archivedConversations] ] as const).map(([section, sectionItems]) => <section className="conversation-group" key={section}>
+          <div className="section-label">{section}</div>
+          {sectionItems.length ? sectionItems.slice(0, section === "RECENTES" && !search ? 8 : sectionItems.length).map((conversation) => {
             const title = conversation.title ?? "Conversa sem título";
             return <div key={conversation.id} className="conversation-entry">
-              <button onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-label={`Abrir conversa: ${title}`}>
+              <button type="button" onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-label={`Abrir conversa: ${title}`}>
                 <Icon name="chat" size={15} /><span>{title}</span>
               </button>
-              <button type="button" className="conversation-rename" onClick={() => startRenameConversation(conversation)} disabled={chatStoreStatus === "checking"} aria-label={`Renomear conversa: ${title}`} title={`Renomear: ${title}`}><Icon name="edit" size={13} /></button>
+              <button type="button" data-conversation-menu-trigger={conversation.id} className="conversation-rename" aria-haspopup="menu" aria-expanded={conversationMenuId === conversation.id} onClick={(event) => { event.stopPropagation(); setConversationMenuId((current) => current === conversation.id ? null : conversation.id); }} onKeyDown={(event) => { if (event.key === "Escape") { setConversationMenuId(null); const id = conversation.id; requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-conversation-menu-trigger="${CSS.escape(id)}"]`)?.focus()); } }} disabled={chatStoreStatus === "checking"} aria-label={`Ações da conversa: ${title}`} title={`Ações: ${title}`}><Icon name="more" size={15} /></button>
+              {conversationMenuId === conversation.id && <div className="conversation-menu" role="menu" aria-label={`Ações para ${title}`} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setConversationMenuId(null); } }} onClick={(event) => event.stopPropagation()}>
+                <button role="menuitem" onClick={() => { setConversationMenuId(null); startRenameConversation(conversation); }}>Renomear</button>
+                <button role="menuitem" onClick={() => updateFlags(conversation, { pinned: !conversation.pinned })}>{conversation.pinned ? "Desafixar" : "Fixar"}</button>
+                <button role="menuitem" onClick={() => updateFlags(conversation, { archived: !conversation.archived })}>{conversation.archived ? "Desarquivar" : "Arquivar"}</button>
+                <button role="menuitem" onClick={() => void shareConversation(conversation, "copy")}>Copiar conversa</button>
+                <button role="menuitem" onClick={() => void shareConversation(conversation, "export")}>Exportar Markdown</button>
+                <button role="menuitem" disabled title="Indisponível: o app ainda não dispõe de criptografia local para proteger dados em repouso.">Trancar · indisponível</button>
+                <button role="menuitem" className="destructive" onClick={() => { setDeleteDialogId(conversation.id); setConversationMenuId(null); }}>Excluir…</button>
+              </div>}
             </div>;
-          }) : <p className="empty-recent">Suas conversas aparecerão aqui.</p>}
+          }) : <p className="empty-recent">{section === "ARQUIVADAS" ? "Nenhuma conversa arquivada." : section === "FIXADAS" ? "Nenhuma conversa fixada." : "Suas conversas aparecerão aqui."}</p>}
+          </section>)}
         </div>
         <div className="sidebar-bottom">
           <div className="local-badge"><span className="pulse-dot" /> Seus dados ficam neste dispositivo</div>
@@ -704,6 +791,7 @@ function App() {
           </form>
         </section>
       </div>}
+      {deleteDialogId && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteDialogId(null); }}><section className="rename-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-description" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDeleteDialogId(null); } }}><h2 id="delete-dialog-title">Excluir conversa?</h2><p id="delete-dialog-description">Esta ação remove a conversa e suas mensagens salvas deste dispositivo. Não pode ser desfeita.</p><div className="rename-dialog-actions"><button type="button" onClick={() => setDeleteDialogId(null)}>Cancelar</button><button type="button" className="rename-save destructive" onClick={confirmDeleteConversation}>Excluir conversa</button></div></section></div>}
     </div>
   );
 }

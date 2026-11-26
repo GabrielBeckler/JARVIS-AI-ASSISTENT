@@ -1,6 +1,6 @@
 import type { StoredMessage } from "./ollama.js";
 
-export type StoredConversation = { id: string; title?: string; updatedAt?: number; messages: StoredMessage[] };
+export type StoredConversation = { id: string; title?: string; updatedAt?: number; messages: StoredMessage[]; pinned?: boolean; archived?: boolean };
 
 export function restoreConversations(saved: string | null, starter: StoredConversation[]): StoredConversation[];
 export function updateMessage(
@@ -22,3 +22,6 @@ export function restoreScrollTop(element: { scrollHeight: number; clientHeight: 
 export function getConversationDraft(drafts: Readonly<Record<string, string>>, conversationId: string): string;
 export function setConversationDraft(drafts: Readonly<Record<string, string>>, conversationId: string, value: string): Record<string, string>;
 export function renameConversationTitle(conversations: StoredConversation[], conversationId: string, title: string, updatedAt: number): StoredConversation[];
+export function updateConversationFlags(conversations: StoredConversation[], conversationId: string, changes: { pinned?: boolean; archived?: boolean }): StoredConversation[];
+export function removeConversation(conversations: StoredConversation[], conversationId: string): StoredConversation[];
+export function exportConversationMarkdown(conversation: StoredConversation): string;

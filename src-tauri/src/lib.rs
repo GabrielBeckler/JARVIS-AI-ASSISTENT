@@ -5,9 +5,11 @@ mod system_metrics;
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     sync::{Mutex, OnceLock},
 };
 use tauri::ipc::Channel;
+use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -101,11 +103,55 @@ fn ollama_cancel_chat(request_id: String) -> bool {
     }
 }
 
+#[tauri::command]
+async fn export_markdown_dialog(
+    app: tauri::AppHandle,
+    suggested_name: String,
+    content: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_file_name(suggested_name)
+            .add_filter("Markdown", &["md"])
+            .blocking_save_file();
+        let Some(path) = selected else {
+            return Ok(false);
+        };
+        let path = path
+            .into_path()
+            .map_err(|error| format!("Caminho de exportação inválido: {error}"))?;
+        write_markdown_file(&path, &content)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|error| format!("Falha ao abrir diálogo de exportação: {error}"))?
+}
+
+fn write_markdown_file(path: &Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content)
+        .map_err(|error| format!("Falha ao gravar arquivo Markdown: {error}"))
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::write_markdown_file;
+
+    #[test]
+    fn reports_markdown_write_failures() {
+        let directory = std::env::temp_dir();
+        let error = write_markdown_file(&directory, "# teste").unwrap_err();
+        assert!(error.starts_with("Falha ao gravar arquivo Markdown:"));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             chat_store::chat_store_database_url,
@@ -114,7 +160,8 @@ pub fn run() {
             system_metrics::system_snapshot,
             ollama_list_models,
             ollama_chat,
-            ollama_cancel_chat
+            ollama_cancel_chat,
+            export_markdown_dialog
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

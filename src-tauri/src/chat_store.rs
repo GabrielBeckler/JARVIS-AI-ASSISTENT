@@ -108,6 +108,10 @@ pub struct ChatConversation {
     pub updated_at: Option<i64>,
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,6 +254,14 @@ fn decode_legacy_conversations(raw: &str) -> Result<Vec<ChatConversation>, Strin
                 title,
                 updated_at,
                 messages,
+                pinned: object
+                    .get("pinned")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                archived: object
+                    .get("archived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()
@@ -384,6 +396,12 @@ async fn ensure_schema(pool: &SqlitePool) -> Result<(), String> {
         sqlx::query("INSERT INTO schema_migrations (version, description) VALUES (1, 'create_conversations_and_messages')")
             .execute(&mut *transaction).await.map_err(database_error)?;
     }
+    if version.unwrap_or(0) < 2 {
+        sqlx::raw_sql("ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0; ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;")
+            .execute(&mut *transaction).await.map_err(database_error)?;
+        sqlx::query("INSERT INTO schema_migrations (version, description) VALUES (2, 'conversation_pin_archive_flags')")
+            .execute(&mut *transaction).await.map_err(database_error)?;
+    }
     transaction.commit().await.map_err(database_error)
 }
 
@@ -406,12 +424,14 @@ async fn insert_imported(
 ) -> Result<(), String> {
     for (position, conversation) in conversations.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO conversations (id, title, updated_at, position) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO conversations (id, title, updated_at, position, pinned, archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&conversation.id)
         .bind(&conversation.title)
         .bind(conversation.updated_at)
         .bind(position as i64)
+        .bind(conversation.pinned)
+        .bind(conversation.archived)
         .execute(&mut **transaction)
         .await
         .map_err(database_error)?;
@@ -442,9 +462,34 @@ async fn insert_message(
 
 async fn save_pool(pool: &SqlitePool, conversations: &[ChatConversation]) -> Result<(), String> {
     let mut transaction = pool.begin().await.map_err(database_error)?;
+    if conversations.is_empty() {
+        sqlx::query("DELETE FROM conversations")
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+    } else {
+        let ids = conversations
+            .iter()
+            .map(|conversation| conversation.id.as_str())
+            .collect::<Vec<_>>();
+        let existing = sqlx::query("SELECT id FROM conversations")
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        for row in existing {
+            let id: String = row.try_get("id").map_err(database_error)?;
+            if !ids.contains(&id.as_str()) {
+                sqlx::query("DELETE FROM conversations WHERE id = ?1")
+                    .bind(id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(database_error)?;
+            }
+        }
+    }
     for (position, conversation) in conversations.iter().enumerate() {
-        sqlx::query("INSERT INTO conversations (id, title, updated_at, position) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, position=excluded.position")
-            .bind(&conversation.id).bind(&conversation.title).bind(conversation.updated_at).bind(position as i64)
+        sqlx::query("INSERT INTO conversations (id, title, updated_at, position, pinned, archived) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, position=excluded.position, pinned=excluded.pinned, archived=excluded.archived")
+            .bind(&conversation.id).bind(&conversation.title).bind(conversation.updated_at).bind(position as i64).bind(conversation.pinned).bind(conversation.archived)
             .execute(&mut *transaction).await.map_err(database_error)?;
         for (message_position, message) in conversation.messages.iter().enumerate() {
             let metrics = message.metrics.as_ref();
@@ -464,7 +509,7 @@ async fn save_pool(pool: &SqlitePool, conversations: &[ChatConversation]) -> Res
 async fn load_pool(pool: &SqlitePool) -> Result<Vec<ChatConversation>, String> {
     let mut transaction = pool.begin().await.map_err(database_error)?;
     let conversation_rows =
-        sqlx::query("SELECT id, title, updated_at FROM conversations ORDER BY position, rowid")
+        sqlx::query("SELECT id, title, updated_at, pinned, archived FROM conversations ORDER BY position, rowid")
             .fetch_all(&mut *transaction)
             .await
             .map_err(database_error)?;
@@ -519,6 +564,8 @@ async fn load_pool(pool: &SqlitePool) -> Result<Vec<ChatConversation>, String> {
             title: row.try_get("title").map_err(database_error)?,
             updated_at: row.try_get("updated_at").map_err(database_error)?,
             messages,
+            pinned: row.try_get::<i64, _>("pinned").map_err(database_error)? != 0,
+            archived: row.try_get::<i64, _>("archived").map_err(database_error)? != 0,
         });
     }
     transaction.commit().await.map_err(database_error)?;
@@ -587,7 +634,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1]);
+        assert_eq!(versions, vec![1, 2]);
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
             .await
@@ -673,6 +720,8 @@ mod tests {
             id: "atomic".into(),
             title: Some("Transação".into()),
             updated_at: Some(42),
+            pinned: true,
+            archived: false,
             messages: vec![
                 ChatMessage {
                     id: "answer-1".into(),
@@ -713,6 +762,8 @@ mod tests {
             id: "saved".into(),
             title: Some("Persistida".into()),
             updated_at: Some(99),
+            pinned: false,
+            archived: true,
             messages: vec![ChatMessage {
                 id: "q".into(),
                 role: ChatRole::User,
@@ -779,6 +830,8 @@ mod tests {
             id: "lock-retry".into(),
             title: Some("Lock retry".into()),
             updated_at: Some(1),
+            pinned: false,
+            archived: false,
             messages: vec![],
         };
 

@@ -41,3 +41,7 @@ export function persistChatStore(conversations: StoredConversation[]): Promise<v
   writes = pending;
   return pending;
 }
+
+export async function exportMarkdownFile(suggestedName: string, content: string): Promise<boolean> {
+  return invoke<boolean>("export_markdown_dialog", { suggestedName, content });
+}
