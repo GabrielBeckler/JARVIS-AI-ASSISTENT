@@ -10,8 +10,10 @@ import { getSystemSnapshot } from "./systemMonitor";
 import { createSystemContextPrompt, isSystemQuestion } from "./systemContext.js";
 import { calculateComposerSize } from "./composerSizing.js";
 import { copyResponseText } from "./clipboard.js";
+import { sanitizeExportFilename } from "./exportFilename.js";
 import { resolveConversationTitle, validateConversationTitle } from "./conversationTitle.js";
 import { getConversationShortcut } from "./conversationShortcuts.js";
+import { dropWithinSection, moveWithinSection, orderConversations, restoreSidebarPreferences, SIDEBAR_PREFERENCES_KEY, type SidebarFilter, type SidebarPreferences, type SidebarSorting } from "./sidebarPreferences.js";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -86,6 +88,10 @@ function App() {
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
   const [deleteDialogId, setDeleteDialogId] = useState<string | null>(null);
   const [conversationNotice, setConversationNotice] = useState("");
+  const [sidebarPreferences, setSidebarPreferences] = useState<SidebarPreferences>(() => {
+    try { return restoreSidebarPreferences(localStorage.getItem(SIDEBAR_PREFERENCES_KEY)); } catch { return restoreSidebarPreferences(null); }
+  });
+  const [sidebarSettingsOpen, setSidebarSettingsOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("system");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [modelStatus, setModelStatus] = useState<ModelStatus>("checking");
@@ -113,13 +119,30 @@ function App() {
   const messageListRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
   const copyFeedbackTimersRef = useRef(new Map<string, number>());
+  const draggedConversationRef = useRef<string | null>(null);
+  const suppressSelectionAfterDragRef = useRef(false);
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const draft = getConversationDraft(draftsByConversation, active.id);
   const renameValidation = renameDialog ? validateConversationTitle(renameDialog.value) : null;
   const matching = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
-  const pinnedConversations = matching.filter((conversation) => conversation.pinned && !conversation.archived);
-  const archivedConversations = matching.filter((conversation) => conversation.archived);
-  const recent = matching.filter((conversation) => !conversation.pinned && !conversation.archived);
+  const orderedMatching = orderConversations(matching, sidebarPreferences.sorting, sidebarPreferences.manualOrder);
+  const pinnedConversations = orderedMatching.filter((conversation) => conversation.pinned && !conversation.archived);
+  const archivedConversations = orderedMatching.filter((conversation) => conversation.archived);
+  const recent = orderedMatching.filter((conversation) => !conversation.pinned && !conversation.archived);
+  const filterCategories: Record<SidebarFilter, Conversation[]> = {
+    all: orderedMatching,
+    pinned: pinnedConversations,
+    archived: archivedConversations,
+    locked: [],
+  };
+  const filtered = filterCategories[sidebarPreferences.filter];
+  const sections: Array<[string, Conversation[]]> = sidebarPreferences.filter === "locked"
+    ? [["TRANCADAS", []]]
+    : sidebarPreferences.filter === "pinned" ? [["FIXADAS", filtered]]
+      : sidebarPreferences.filter === "archived" ? [["ARQUIVADAS", filtered]]
+        : sidebarPreferences.organization === "project"
+          ? [["FIXADAS", pinnedConversations], ["SEM PROJETO", recent], ["ARQUIVADAS", archivedConversations]]
+          : [["FIXADAS", pinnedConversations], ["RECENTES", recent], ["ARQUIVADAS", archivedConversations]];
   const activeRequestId = activeRequests[active.id];
   const activeStream = streamingByConversation[active.id];
   const syncScrollPosition = useCallback((conversationId: string, list: HTMLDivElement) => {
@@ -187,6 +210,27 @@ function App() {
       setChatStoreError(error instanceof Error ? error.message : String(error));
     });
   }, [conversations, chatStoreStatus]);
+
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_PREFERENCES_KEY, JSON.stringify(sidebarPreferences)); }
+    catch { setConversationNotice("Não foi possível salvar as preferências da barra lateral neste dispositivo."); }
+  }, [sidebarPreferences]);
+
+  useEffect(() => {
+    if (!sidebarSettingsOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !document.querySelector(".sidebar-settings-panel")?.contains(event.target) && !document.querySelector(".sidebar-settings-trigger")?.contains(event.target)) setSidebarSettingsOpen(false);
+    };
+    const closeEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setSidebarSettingsOpen(false); document.querySelector<HTMLButtonElement>(".sidebar-settings-trigger")?.focus(); }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, [sidebarSettingsOpen]);
 
   useEffect(() => {
     localStorage.setItem("jarvis.ollama.keepAlive", keepAlive);
@@ -357,8 +401,33 @@ function App() {
     const conversation = { ...starter, id: crypto.randomUUID(), updatedAt: Date.now() };
     focusNewConversationRef.current = true;
     setConversations((items) => [conversation, ...items]);
+    setSidebarPreferences((prefs) => ({ ...prefs, manualOrder: [conversation.id, ...prefs.manualOrder.filter((id) => id !== conversation.id)] }));
     setActiveId(conversation.id);
   }, [chatStoreStatus]);
+
+  const setSidebarPreference = <K extends keyof SidebarPreferences>(key: K, value: SidebarPreferences[K]) => {
+    setSidebarPreferences((current) => ({ ...current, [key]: value }));
+  };
+
+  const setSidebarSorting = (sorting: SidebarSorting) => {
+    setSidebarPreferences((current) => ({
+      ...current,
+      sorting,
+      manualOrder: sorting === "manual"
+        ? [...orderConversations(conversations, "updated", current.manualOrder).map((conversation) => conversation.id)]
+        : current.manualOrder,
+    }));
+  };
+
+  const reorderSidebarConversation = (conversationId: string, sectionItems: Conversation[], direction: -1 | 1) => {
+    const sectionIds = sectionItems.map((conversation) => conversation.id);
+    setSidebarPreferences((current) => ({ ...current, manualOrder: moveWithinSection(current.manualOrder, sectionIds, conversationId, direction) }));
+  };
+
+  const dropSidebarConversation = (sourceId: string, targetId: string, sectionItems: Conversation[]) => {
+    const sectionIds = sectionItems.map((conversation) => conversation.id);
+    setSidebarPreferences((current) => ({ ...current, manualOrder: dropWithinSection(current.manualOrder, sectionIds, sourceId, targetId) }));
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -403,6 +472,7 @@ function App() {
 
   const updateFlags = (conversation: Conversation, changes: { pinned?: boolean; archived?: boolean }) => {
     setConversations((items) => updateConversationFlags(items, conversation.id, changes));
+    if (changes.pinned) setSidebarPreferences((current) => ({ ...current, manualOrder: [conversation.id, ...current.manualOrder.filter((id) => id !== conversation.id)] }));
     setConversationMenuId(null);
     if (changes.archived && conversation.id === activeId) {
       const next = conversations.find((item) => item.id !== conversation.id && !item.archived);
@@ -430,7 +500,7 @@ function App() {
         await copyResponseText(markdown);
         setConversationNotice("Conversa copiada para a área de transferência.");
       } else {
-        const safeName = (conversation.title || "conversa").replace(/[\\/:*?\"<>|]/gu, "-").slice(0, 100);
+        const safeName = sanitizeExportFilename(conversation.title);
         const saved = await exportMarkdownFile(`${safeName || "conversa"}.md`, markdown);
         setConversationNotice(saved ? "Conversa exportada em Markdown." : "Exportação cancelada.");
       }
@@ -652,13 +722,31 @@ function App() {
           <button className="nav-item"><span className="nav-icon"><Icon name="chat" size={16} /></span><span>Conversas</span></button>
         </div>
         <div className="sidebar-section recent-section">
+          <div className="section-label recent-heading"><span>RECENTES</span><button type="button" className="sidebar-settings-trigger" aria-label="Configurar barra lateral" aria-haspopup="true" aria-expanded={sidebarSettingsOpen} onClick={() => setSidebarSettingsOpen((open) => !open)}><Icon name="more" size={16} /></button></div>
+          {sidebarSettingsOpen && <div className="sidebar-settings-panel" role="region" aria-label="Configurações da barra lateral">
+            <fieldset><legend>Organização</legend>
+              <label><input type="radio" name="sidebar-organization" checked={sidebarPreferences.organization === "list"} onChange={() => setSidebarPreference("organization", "list")} /> Lista</label>
+              <label><input type="radio" name="sidebar-organization" checked={sidebarPreferences.organization === "project"} onChange={() => setSidebarPreference("organization", "project")} /> Por projeto</label>
+            </fieldset>
+            <fieldset><legend>Ordenação</legend>
+              <label><input type="radio" name="sidebar-sorting" checked={sidebarPreferences.sorting === "updated"} onChange={() => setSidebarSorting("updated")} /> Última atualização</label>
+              <label><input type="radio" name="sidebar-sorting" checked={sidebarPreferences.sorting === "manual"} onChange={() => setSidebarSorting("manual")} /> Manual</label>
+            </fieldset>
+            <label className="sidebar-filter-label" htmlFor="sidebar-filter">Exibir</label>
+            <select id="sidebar-filter" value={sidebarPreferences.filter} onChange={(event) => setSidebarPreference("filter", event.target.value as SidebarFilter)}>
+              <option value="all">Todos</option><option value="pinned">Fixadas</option><option value="archived">Arquivadas</option><option value="locked">Trancadas</option>
+            </select>
+            {sidebarPreferences.filter === "locked" && <p className="sidebar-settings-note">Trancar conversas ainda não está disponível: o app não tem criptografia local em repouso.</p>}
+            {sidebarPreferences.organization === "project" && <p className="sidebar-settings-note">O vínculo e o cadastro de projetos ainda não existem. Conversas sem vínculo aparecem em “Sem projeto” até essa integração ser implementada.</p>}
+          </div>}
           {conversationNotice && <p className="conversation-notice" role="status" aria-live="polite">{conversationNotice}</p>}
-          {([ ["FIXADAS", pinnedConversations], ["RECENTES", recent], ["ARQUIVADAS", archivedConversations] ] as const).map(([section, sectionItems]) => <section className="conversation-group" key={section}>
+          {sections.map(([section, sectionItems]) => <section className="conversation-group" key={section}>
           <div className="section-label">{section}</div>
-          {sectionItems.length ? sectionItems.slice(0, section === "RECENTES" && !search ? 8 : sectionItems.length).map((conversation) => {
+          {sectionItems.length ? orderConversations(sectionItems, sidebarPreferences.sorting, sidebarPreferences.manualOrder).slice(0, section === "RECENTES" && !search && sidebarPreferences.sorting === "updated" ? 8 : sectionItems.length).map((conversation, sectionIndex, visibleSection) => {
             const title = conversation.title ?? "Conversa sem título";
-            return <div key={conversation.id} className="conversation-entry">
-              <button type="button" onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-label={`Abrir conversa: ${title}`}>
+            const sectionIds = visibleSection.map((item) => item.id);
+            return <div key={conversation.id} className="conversation-entry" draggable={sidebarPreferences.sorting === "manual"} onDragStart={(event) => { draggedConversationRef.current = conversation.id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", conversation.id); }} onDragOver={(event) => { if (sidebarPreferences.sorting === "manual") event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); const sourceId = draggedConversationRef.current ?? event.dataTransfer.getData("text/plain"); if (sourceId) { dropSidebarConversation(sourceId, conversation.id, sectionItems); suppressSelectionAfterDragRef.current = true; window.setTimeout(() => { suppressSelectionAfterDragRef.current = false; }, 0); } draggedConversationRef.current = null; }} onDragEnd={() => { draggedConversationRef.current = null; }}>
+              <button type="button" onClick={() => { if (suppressSelectionAfterDragRef.current) return; setActiveId(conversation.id); }} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-label={`Abrir conversa: ${title}`}>
                 <Icon name="chat" size={15} /><span>{title}</span>
               </button>
               <button type="button" data-conversation-menu-trigger={conversation.id} className="conversation-rename" aria-haspopup="menu" aria-expanded={conversationMenuId === conversation.id} onClick={(event) => { event.stopPropagation(); setConversationMenuId((current) => current === conversation.id ? null : conversation.id); }} onKeyDown={(event) => { if (event.key === "Escape") { setConversationMenuId(null); const id = conversation.id; requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-conversation-menu-trigger="${CSS.escape(id)}"]`)?.focus()); } }} disabled={chatStoreStatus === "checking"} aria-label={`Ações da conversa: ${title}`} title={`Ações: ${title}`}><Icon name="more" size={15} /></button>
@@ -666,13 +754,17 @@ function App() {
                 <button role="menuitem" onClick={() => { setConversationMenuId(null); startRenameConversation(conversation); }}>Renomear</button>
                 <button role="menuitem" onClick={() => updateFlags(conversation, { pinned: !conversation.pinned })}>{conversation.pinned ? "Desafixar" : "Fixar"}</button>
                 <button role="menuitem" onClick={() => updateFlags(conversation, { archived: !conversation.archived })}>{conversation.archived ? "Desarquivar" : "Arquivar"}</button>
+                {sidebarPreferences.sorting === "manual" && <>
+                  <button role="menuitem" disabled={sectionIndex === 0} onClick={() => reorderSidebarConversation(conversation.id, sectionItems, -1)}>Mover para cima</button>
+                  <button role="menuitem" disabled={sectionIndex === sectionIds.length - 1} onClick={() => reorderSidebarConversation(conversation.id, sectionItems, 1)}>Mover para baixo</button>
+                </>}
                 <button role="menuitem" onClick={() => void shareConversation(conversation, "copy")}>Copiar conversa</button>
                 <button role="menuitem" onClick={() => void shareConversation(conversation, "export")}>Exportar Markdown</button>
                 <button role="menuitem" disabled title="Indisponível: o app ainda não dispõe de criptografia local para proteger dados em repouso.">Trancar · indisponível</button>
                 <button role="menuitem" className="destructive" onClick={() => { setDeleteDialogId(conversation.id); setConversationMenuId(null); }}>Excluir…</button>
               </div>}
             </div>;
-          }) : <p className="empty-recent">{section === "ARQUIVADAS" ? "Nenhuma conversa arquivada." : section === "FIXADAS" ? "Nenhuma conversa fixada." : "Suas conversas aparecerão aqui."}</p>}
+          }) : <p className="empty-recent">{section === "TRANCADAS" ? "Nenhuma conversa trancada. A proteção ainda não está disponível." : section === "ARQUIVADAS" ? "Nenhuma conversa arquivada corresponde ao filtro." : section === "FIXADAS" ? "Nenhuma conversa fixada corresponde ao filtro." : "Nenhuma conversa corresponde ao filtro."}</p>}
           </section>)}
         </div>
         <div className="sidebar-bottom">

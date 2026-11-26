@@ -1,0 +1,12 @@
+export type SidebarOrganization = "list" | "project";
+export type SidebarSorting = "updated" | "manual";
+export type SidebarFilter = "all" | "pinned" | "archived" | "locked";
+export type SidebarPreferences = { organization: SidebarOrganization; sorting: SidebarSorting; filter: SidebarFilter; manualOrder: string[] };
+export const SIDEBAR_PREFERENCES_KEY: string;
+export const defaultSidebarPreferences: Readonly<SidebarPreferences>;
+export function normalizeSidebarPreferences(value: unknown): SidebarPreferences;
+export function restoreSidebarPreferences(saved: string | null): SidebarPreferences;
+export function orderConversations<T extends { id: string; updatedAt?: number }>(conversations: T[], sorting: SidebarSorting, manualOrder: string[]): T[];
+export function filterConversations<T extends { title?: string; pinned?: boolean; archived?: boolean; locked?: boolean }>(conversations: T[], filter: SidebarFilter, query: string): T[];
+export function moveWithinSection(manualOrder: string[], sectionIds: string[], conversationId: string, direction: -1 | 1): string[];
+export function dropWithinSection(manualOrder: string[], sectionIds: string[], sourceId: string, targetId: string): string[];
