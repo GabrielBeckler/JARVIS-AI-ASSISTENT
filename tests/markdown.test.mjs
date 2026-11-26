@@ -13,7 +13,7 @@ test("renders paragraphs, lists, emphasis, inline code, and fenced code", () => 
   const html = render("Primeiro parágrafo.\n\n- item **forte**\n- `código`\n\n```ts\nconst answer = 42\n```");
   assert.match(html, /<p>Primeiro parágrafo\.<\/p>/);
   assert.match(html, /<ul>[\s\S]*<li>item <strong>forte<\/strong><\/li>[\s\S]*<li><code>código<\/code><\/li>[\s\S]*<\/ul>/);
-  assert.match(html, /<pre><code class="language-ts">const answer = 42\n<\/code><\/pre>/);
+  assert.match(html, /<pre tabindex="0" aria-label="Bloco de código"><code class="language-ts">const answer = 42\n<\/code><\/pre>/);
 });
 
 test("renders the Windows heading example, italics, nested lists, links, and inline code", () => {
@@ -46,7 +46,7 @@ test("blocks unsafe and relative links while keeping safe external links inert u
 test("keeps unfinished streaming Markdown readable", () => {
   const html = render("Resposta **parcial\n\n```js\nconst text = 'chegando'");
   assert.match(html, /Resposta \*\*parcial/);
-  assert.match(html, /<pre><code class="language-js">const text = &#x27;chegando&#x27;\n<\/code><\/pre>/);
+  assert.match(html, /<pre\b[^>]*><code class="language-js">const text = &#x27;chegando&#x27;\n<\/code><\/pre>/);
 });
 
 test("continues rendering plain-text messages from older conversations", () => {

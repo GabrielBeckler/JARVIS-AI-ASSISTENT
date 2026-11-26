@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { chartPath, CHART_WINDOW_MS } from "./systemChart.js";
 import { getSystemSnapshot, type SystemMetric, type SystemSnapshot } from "./systemMonitor";
 
 const SAMPLE_INTERVAL_MS = 2_000;
@@ -39,17 +40,6 @@ function SystemIcon({ name, size = 15 }: { name: string; size?: number }) {
   </svg>;
 }
 
-function chartPath(samples: SystemSnapshot[], value: (sample: SystemSnapshot) => number | null): string {
-  const points = samples.flatMap((sample, index) => {
-    const current = value(sample);
-    if (current == null || !Number.isFinite(current)) return [];
-    const x = samples.length < 2 ? 50 : index / (samples.length - 1) * 100;
-    const y = 68 - Math.max(0, Math.min(100, current)) / 100 * 62;
-    return [`${index === 0 || samples.slice(0, index).every((item) => value(item) == null) ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`];
-  });
-  return points.join(" ");
-}
-
 function MetricCard({
   title,
   icon,
@@ -70,10 +60,13 @@ function MetricCard({
   const progress = percent == null ? 0 : Math.max(0, Math.min(100, percent));
   return <div className="metric-card">
     <div className="metric-head"><span><SystemIcon name={icon} /> {title}</span><span className={`metric-value ${percent == null ? "na" : ""}`}>{value}</span></div>
-    <div className="metric-track" role="progressbar" aria-label={`${title} em uso`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent == null ? undefined : progress}>
+    <div className="metric-track" aria-hidden="true">
       {percent != null && <i className={`metric-fill ${icon}`} style={{ width: `${progress}%` }} />}
     </div>
-    <div className="metric-foot"><span title={name}>{name}</span><span title={reason ? `${detail} · ${reason}` : detail}>{detail}{reason ? ` · ${briefReason(reason)}` : ""}</span></div>
+    <div className="metric-foot">
+      <span>{name}</span>
+      <span title={reason || undefined}>{detail}{reason ? ` · ${briefReason(reason)}` : ""}</span>
+    </div>
   </div>;
 }
 
@@ -96,7 +89,7 @@ export function SystemDashboard() {
         const snapshot = await getSystemSnapshot();
         if (!mounted) return;
         setSamples((current) => [...current, snapshot]
-          .filter((sample) => sample.timestampMs >= snapshot.timestampMs - 60_000)
+          .filter((sample) => sample.timestampMs >= snapshot.timestampMs - CHART_WINDOW_MS)
           .slice(-MAX_SAMPLES));
         setCollectionError("");
         setNow(Date.now());
@@ -128,11 +121,20 @@ export function SystemDashboard() {
   const gpuTemp = latest?.temperatures.gpuCelsius;
   const waiting = !latest && !collectionError;
 
+  const chartEnd = Math.max(now, latest?.timestampMs ?? 0);
+  const series = [
+    { label: "CPU", className: "cpu", value: (sample: SystemSnapshot) => sample.cpu.usagePercent.value },
+    { label: "RAM", className: "ram", value: (sample: SystemSnapshot) => sample.memory.usedPercent.value },
+    { label: "GPU", className: "gpu", value: (sample: SystemSnapshot) => sample.gpu.usagePercent.value },
+  ].map(({ value, ...item }) => ({
+    ...item,
+    path: chartPath(samples.map((sample) => ({ timestampMs: sample.timestampMs, value: value(sample) })), chartEnd, SAMPLE_INTERVAL_MS),
+  }));
+
   return <div className="dashboard-content system-dashboard" tabIndex={0} aria-label="Métricas do sistema">
     <div className="system-summary">
-      <div className="summary-icon"><SystemIcon name="cpu" size={17} /></div>
-      <div><strong>Seu sistema</strong><span>{latest?.platformName ?? "Plataforma não identificada"}</span></div>
-      <span className={`live-label ${!latest && collectionError ? "unavailable" : oldData ? "stale" : latest ? "available" : "unavailable"}`}><i />{waiting ? "VERIFICANDO" : !latest ? "INDISPONÍVEL" : oldData ? "DADOS ANTIGOS" : "AO VIVO"}</span>
+      <strong>{latest?.platformName ?? (waiting ? "Sistema" : "Plataforma N/D")}</strong>
+      <span className={`live-label ${!latest && collectionError ? "unavailable" : oldData ? "stale" : latest ? "available" : "unavailable"}`}><i />{waiting ? "Verificando" : !latest ? "Indisponível" : oldData ? "Dados antigos" : "Ao vivo"}</span>
     </div>
 
     {collectionError && <div className="system-collection-notice" role="status">
@@ -141,32 +143,38 @@ export function SystemDashboard() {
 
     <MetricCard title="Processador" icon="cpu" value={cpu ? metricText(cpu.usagePercent) : "N/D"}
       name={cpu?.name ?? (waiting ? "Verificando processador…" : cpu?.nameReason ?? "Nome não disponível")}
-      detail="Uso total · amostras separadas por 250 ms" reason={cpu ? reasonText(cpu.usagePercent) : ""} percent={cpuUsage} />
+      detail="Uso total" reason={cpu ? reasonText(cpu.usagePercent) : ""} percent={cpuUsage} />
 
     <MetricCard title="Memória RAM" icon="memory" value={memory ? metricText(memory.usedPercent) : "N/D"}
       name={memory ? `${bytesText(memory.usedBytes)} usados de ${bytesText(memory.totalBytes)}` : waiting ? "Verificando memória…" : "RAM não disponível"}
-      detail={memory ? `Velocidade: ${metricText(memory.speedMtS)}` : "Memória usada e total"}
+      detail={`Velocidade: ${memory ? metricText(memory.speedMtS) : "N/D"}`}
       reason={memory ? reasonText(memory.usedBytes) || reasonText(memory.speedMtS) : ""} percent={ramUsage} />
 
     <MetricCard title="GPU" icon="gpu" value={gpu ? metricText(gpu.usagePercent) : "N/D"}
       name={gpu?.name ?? (waiting ? "Verificando GPU…" : gpu?.nameReason ?? "GPU não detectada")}
-      detail={gpu ? `VRAM ${bytesText(gpu.vramUsedBytes)} / ${bytesText(gpu.vramTotalBytes)}` : "Uso e VRAM"}
+      detail={gpu ? `VRAM ${bytesText(gpu.vramUsedBytes)} / ${bytesText(gpu.vramTotalBytes)}` : "VRAM N/D"}
       reason={gpu ? [reasonText(gpu.usagePercent), reasonText(gpu.vramUsedBytes)].filter(Boolean).join(" · ") : ""} percent={gpuUsage} />
 
-    <div className="temperature-card">
-      <div className="temperature-copy"><span className="section-label">TEMPERATURAS</span><strong>CPU {cpuTemp ? metricText(cpuTemp, 1) : "N/D"} · GPU {gpuTemp ? metricText(gpuTemp, 1) : "N/D"}</strong><small>{cpuTemp ? reasonText(cpuTemp) : "CPU: sensor indisponível"}{gpuTemp?.value == null ? ` · GPU: ${gpuTemp?.reason ?? "sensor indisponível"}` : ""}</small></div>
-      <div className="temperature-reading" aria-hidden="true">°<span>C</span></div>
-    </div>
+    <section className="temperature-card" aria-labelledby="temperatures-title">
+      <h3 id="temperatures-title">Temperaturas</h3>
+      <dl>
+        {[{ label: "CPU", sensor: cpuTemp }, { label: "GPU", sensor: gpuTemp }].map(({ label, sensor }) =>
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{sensor ? metricText(sensor, 1) : "N/D"}</dd>
+            {sensor?.reason && <dd className="temperature-reason">{briefReason(sensor.reason)}</dd>}
+          </div>
+        )}
+      </dl>
+    </section>
 
-    <div className="chart-card">
-      <div className="chart-title"><span>Atividade recente</span><span>ÚLTIMOS 60S · 2S</span></div>
-      {samples.length ? <svg className="system-chart" viewBox="0 0 100 72" preserveAspectRatio="none" role="img" aria-label="Uso de CPU, memória e GPU nos últimos 60 segundos">
-        <path className="chart-line cpu-line" d={chartPath(samples, (sample) => sample.cpu.usagePercent.value)} />
-        <path className="chart-line ram-line" d={chartPath(samples, (sample) => sample.memory.usedPercent.value)} />
-        <path className="chart-line gpu-line" d={chartPath(samples, (sample) => sample.gpu.usagePercent.value)} />
-      </svg> : <div className="chart-placeholder"><div className="chart-grid"><i /><i /><i /></div><div className="chart-empty">{waiting ? "Coletando dados…" : "Sem amostras disponíveis"}</div></div>}
-      <div className="chart-legend"><span><i className="violet-dot" />CPU</span><span><i className="blue-dot" />RAM</span><span><i className="amber-dot" />GPU</span></div>
-    </div>
+    <section className="chart-card" aria-labelledby="chart-heading">
+      <div className="chart-title"><h3 id="chart-heading">Atividade</h3><span>Últimos 60 s</span></div>
+      {series.some(({ path }) => path) ? <svg className="system-chart" viewBox="0 0 100 72" preserveAspectRatio="none" role="img" aria-label="Uso de CPU, RAM e GPU nos últimos 60 segundos">
+        {series.map(({ label, className, path }) => <path key={label} className={`chart-line ${className}-line`} d={path} />)}
+      </svg> : <p className="chart-empty">{waiting ? "Coletando dados…" : "Sem amostras disponíveis"}</p>}
+      <div className="chart-legend">{series.map(({ label, className, path }) => <span key={label}><i className={`chart-key ${className}`} />{label}{!path && " · N/D"}</span>)}</div>
+    </section>
 
     <div className="system-footer"><span className="pulse-dot" />{latest ? `${oldData ? "Dados antigos · " : ""}última leitura ${updatedLabel(latest.timestampMs)}${ageMs != null && ageMs > STALE_AFTER_MS ? ` · há ${Math.floor(ageMs / 1_000)} s` : ""}` : collectionError || "Aguardando primeira leitura"}</div>
   </div>;

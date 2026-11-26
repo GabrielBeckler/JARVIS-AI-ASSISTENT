@@ -29,6 +29,7 @@ function SafeLink({ href, children }) {
 const components = {
   a: SafeLink,
   img: () => null,
+  pre: ({ children }) => createElement("pre", { tabIndex: 0, "aria-label": "Bloco de código" }, children),
 };
 
 export function MarkdownMessage({ content }) {

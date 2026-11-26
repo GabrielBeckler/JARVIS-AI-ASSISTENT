@@ -2,6 +2,9 @@ import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboard
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
+import { ConversationDialog } from "./ConversationDialog";
+import { ConversationMenu } from "./ConversationMenu";
+import { ThemedSelect } from "./ThemedSelect";
 import { MarkdownMessage } from "./MarkdownMessage.js";
 import { SystemDashboard } from "./SystemDashboard";
 import { exportMarkdownFile, initializeChatStore, persistChatStore } from "./chatStore";
@@ -86,16 +89,18 @@ function App() {
   const [draftsByConversation, setDraftsByConversation] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
-  const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
+  const [conversationMenu, setConversationMenu] = useState<{ id: string; anchor: HTMLButtonElement } | null>(null);
+  const conversationMenuId = conversationMenu?.id;
   const [deleteDialogId, setDeleteDialogId] = useState<string | null>(null);
   const [conversationNotice, setConversationNotice] = useState("");
   const [sidebarPreferences, setSidebarPreferences] = useState<SidebarPreferences>(() => {
     try { return restoreSidebarPreferences(localStorage.getItem(SIDEBAR_PREFERENCES_KEY)); } catch { return restoreSidebarPreferences(null); }
   });
   const [sidebarSettingsOpen, setSidebarSettingsOpen] = useState(false);
-  const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(() => {
+  const [preferredWidths, setPreferredWidths] = useState<LayoutWidths>(() => {
     try { return restoreLayoutWidths(localStorage.getItem(LAYOUT_STORAGE_KEY)); } catch { return restoreLayoutWidths(null); }
   });
+  const [shellWidth, setShellWidth] = useState(() => window.innerWidth);
   const [panel, setPanel] = useState<Panel>("system");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [modelStatus, setModelStatus] = useState<ModelStatus>("checking");
@@ -119,7 +124,7 @@ function App() {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const appShellRef = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
-  const renameInput = useRef<HTMLInputElement>(null);
+  const resizeStart = useRef<{ pointerId: number; x: number; width: number } | null>(null);
   const focusNewConversationRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
@@ -222,31 +227,27 @@ function App() {
   }, [sidebarPreferences]);
 
   useEffect(() => {
-    try { localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layoutWidths)); } catch { /* Keep the current session usable if local storage is unavailable. */ }
-  }, [layoutWidths]);
+    try { localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(preferredWidths)); } catch { /* Keep the current session usable if local storage is unavailable. */ }
+  }, [preferredWidths]);
 
   useEffect(() => {
     const shell = appShellRef.current;
     if (!shell || typeof ResizeObserver === "undefined") return;
-    const resizeToFit = () => {
-      const width = shell.clientWidth;
-      if (width < 600) return;
-      setLayoutWidths((current) => clampLayoutWidths(current, width));
-    };
+    const resizeToFit = () => setShellWidth(shell.clientWidth);
     const observer = new ResizeObserver(resizeToFit);
     observer.observe(shell);
-    window.addEventListener("resize", resizeToFit);
     resizeToFit();
     return () => {
       observer.disconnect();
-      window.removeEventListener("resize", resizeToFit);
     };
   }, []);
 
   useEffect(() => {
     if (!sidebarSettingsOpen) return;
     const closeOutside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !document.querySelector(".sidebar-settings-panel")?.contains(event.target) && !document.querySelector(".sidebar-settings-trigger")?.contains(event.target)) setSidebarSettingsOpen(false);
+      if (event.target instanceof Element && !event.target.closest(".sidebar-settings-panel, .sidebar-settings-trigger, #sidebar-filter-options")) {
+        setSidebarSettingsOpen(false);
+      }
     };
     const closeEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") { setSidebarSettingsOpen(false); document.querySelector<HTMLButtonElement>(".sidebar-settings-trigger")?.focus(); }
@@ -287,39 +288,10 @@ function App() {
     textarea.current?.focus({ preventScroll: true });
   }, [activeId]);
 
-  useEffect(() => {
-    if (renameDialog) renameInput.current?.focus();
-  }, [renameDialog?.conversationId]);
-
-  useEffect(() => {
-    if (!deleteDialogId) return;
-    document.querySelector<HTMLButtonElement>('[role="alertdialog"] button')?.focus();
-  }, [deleteDialogId]);
-
-  useEffect(() => {
-    if (!conversationMenuId) return;
-    const menu = document.querySelector<HTMLElement>('[role="menu"]');
-    menu?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-    const closeOutside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menu?.contains(event.target)) setConversationMenuId(null);
-    };
-    const moveMenuFocus = (event: KeyboardEvent) => {
-      if (!menu || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)'));
-      if (!items.length) return;
-      const current = items.indexOf(document.activeElement as HTMLButtonElement);
-      const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
-        : (current + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
-      event.preventDefault();
-      items[index].focus();
-    };
-    document.addEventListener("pointerdown", closeOutside);
-    document.addEventListener("keydown", moveMenuFocus);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside);
-      document.removeEventListener("keydown", moveMenuFocus);
-    };
-  }, [conversationMenuId]);
+  const dismissConversationMenu = useCallback((restoreFocus: boolean) => {
+    if (restoreFocus) conversationMenu?.anchor.focus({ preventScroll: true });
+    setConversationMenu(null);
+  }, [conversationMenu]);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -462,12 +434,9 @@ function App() {
       const localShortcutChord = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && (key === "k" || key === "f");
       if (!localShortcutChord) return;
       const overlayOpen = Boolean(document.querySelector('dialog[open], [role="dialog"]:not([hidden]), [role="menu"]:not([hidden]), [aria-modal="true"]'));
+      const action = getConversationShortcut(event, overlayOpen);
       // Ctrl+F must never reach the WebView's built-in page finder, including repeats.
       if (key === "f" && !event.isComposing && !event.defaultPrevented) event.preventDefault();
-      if (overlayOpen) {
-        return;
-      }
-      const action = getConversationShortcut(event, overlayOpen);
       if (!action) {
         if (event.repeat) event.stopPropagation();
         return;
@@ -485,7 +454,22 @@ function App() {
     setRenameDialog({ conversationId: conversation.id, value: conversation.title ?? "" });
   };
 
-  const closeRenameDialog = () => setRenameDialog(null);
+  const restoreConversationFocus = (id: string, fallback = searchInput.current) => {
+    requestAnimationFrame(() => {
+      const trigger = document.querySelector<HTMLButtonElement>(`[data-conversation-menu-trigger="${CSS.escape(id)}"]`);
+      (trigger ?? fallback)?.focus({ preventScroll: true });
+    });
+  };
+
+  const closeRenameDialog = () => {
+    if (renameDialog) restoreConversationFocus(renameDialog.conversationId);
+    setRenameDialog(null);
+  };
+
+  const closeDeleteDialog = () => {
+    if (deleteDialogId) restoreConversationFocus(deleteDialogId);
+    setDeleteDialogId(null);
+  };
 
   const saveConversationTitle = (event: FormEvent) => {
     event.preventDefault();
@@ -494,13 +478,14 @@ function App() {
     if (!validation.valid) return;
     const updatedAt = Date.now();
     setConversations((items) => renameConversationTitle(items, renameDialog.conversationId, validation.value, updatedAt));
-    setRenameDialog(null);
+    closeRenameDialog();
   };
 
   const updateFlags = (conversation: Conversation, changes: { pinned?: boolean; archived?: boolean }) => {
     setConversations((items) => updateConversationFlags(items, conversation.id, changes));
     if (changes.pinned) setSidebarPreferences((current) => ({ ...current, manualOrder: [conversation.id, ...current.manualOrder.filter((id) => id !== conversation.id)] }));
-    setConversationMenuId(null);
+    setConversationMenu(null);
+    restoreConversationFocus(conversation.id);
     if (changes.archived && conversation.id === activeId) {
       const next = conversations.find((item) => item.id !== conversation.id && !item.archived);
       if (next) setActiveId(next.id);
@@ -517,10 +502,13 @@ function App() {
       if (next) setActiveId(next.id);
       else newConversation();
     }
+    if (activeId !== id || next) restoreConversationFocus(id);
     setDeleteDialogId(null);
   };
 
   const shareConversation = async (conversation: Conversation, mode: "copy" | "export") => {
+    setConversationMenu(null);
+    restoreConversationFocus(conversation.id);
     const markdown = exportConversationMarkdown(conversation);
     try {
       if (mode === "copy") {
@@ -534,7 +522,6 @@ function App() {
     } catch {
       setConversationNotice(mode === "copy" ? "Não foi possível copiar a conversa." : "Não foi possível exportar a conversa.");
     }
-    setConversationMenuId(null);
   };
 
   const updateActiveDraft = (value: string) => {
@@ -734,30 +721,46 @@ function App() {
     });
   };
 
-  const resizeFromPointer = (area: ResizableArea, event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "mouse" && event.buttons === 0) return;
-    const shell = appShellRef.current;
-    if (!shell) return;
+  const layoutWidths = clampLayoutWidths(preferredWidths, shellWidth);
+
+  const adjustRail = (area: ResizableArea, delta: number, start = layoutWidths) => {
+    const key = area === "sidebar" ? "sidebarWidth" : "dashboardWidth";
+    const resized = resizeLayoutArea(start, area, delta, shellWidth);
+    setPreferredWidths((current) => current[key] === resized[key] ? current : { ...current, [key]: resized[key] });
+  };
+
+  const startResize = (area: ResizableArea, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !event.isPrimary) return;
     event.preventDefault();
-    const bounds = shell.getBoundingClientRect();
-    const width = area === "sidebar" ? event.clientX - bounds.left : bounds.right - event.clientX;
-    setLayoutWidths((current) => clampLayoutWidths({ ...current, [area === "sidebar" ? "sidebarWidth" : "dashboardWidth"]: width }, bounds.width));
+    event.currentTarget.focus({ preventScroll: true });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeStart.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      width: area === "sidebar" ? layoutWidths.sidebarWidth : layoutWidths.dashboardWidth,
+    };
+  };
+
+  const resizeFromPointer = (area: ResizableArea, event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = resizeStart.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    const delta = (event.clientX - start.x) * (area === "sidebar" ? 1 : -1);
+    adjustRail(area, delta, { ...layoutWidths, [area === "sidebar" ? "sidebarWidth" : "dashboardWidth"]: start.width });
   };
 
   const resizeFromKeyboard = (area: ResizableArea, event: ReactKeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 48 : 16;
-    let delta = 0;
-    if (event.key === "ArrowLeft") delta = area === "sidebar" ? -step : step;
-    else if (event.key === "ArrowRight") delta = area === "sidebar" ? step : -step;
-    else if (event.key === "Home") delta = -10000;
-    else if (event.key === "End") delta = 10000;
-    else return;
+    const direction = area === "sidebar" ? 1 : -1;
+    if (event.key === "ArrowLeft") adjustRail(area, -step * direction);
+    else if (event.key === "ArrowRight") adjustRail(area, step * direction);
+    else if (event.key === "Home" || event.key === "End") {
+      const limits = getLayoutLimits(layoutWidths, shellWidth)[area];
+      const width = area === "sidebar" ? layoutWidths.sidebarWidth : layoutWidths.dashboardWidth;
+      adjustRail(area, (event.key === "Home" ? limits.min : limits.max) - width);
+    } else return;
     event.preventDefault();
-    const width = appShellRef.current?.clientWidth ?? window.innerWidth;
-    setLayoutWidths((current) => resizeLayoutArea(current, area, delta, width));
   };
 
-  const shellWidth = appShellRef.current?.clientWidth ?? window.innerWidth;
   const layoutLimits = getLayoutLimits(layoutWidths, shellWidth);
   const layoutStyle = {
     "--sidebar-width": `${layoutWidths.sidebarWidth}px`,
@@ -769,18 +772,17 @@ function App() {
       <aside id="left-rail" className="left-rail" aria-label="Navegação e conversas" tabIndex={0}>
         <div className="brand-lockup">
           <div className="brand-mark"><Icon name="spark" size={19} /></div>
-          <div><strong>JARVIS</strong><span>LOCAL INTELLIGENCE</span></div>
+          <div><strong>JARVIS</strong><span>Assistente local</span></div>
         </div>
         <button className="new-chat" onClick={newConversation} disabled={chatStoreStatus === "checking"}><Icon name="plus" size={17} /><span>{chatStoreStatus === "checking" ? "Restaurando histórico…" : "Nova conversa"}</span><kbd>Ctrl K</kbd></button>
         <label className="search-box"><Icon name="search" size={16} /><input ref={searchInput} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversas" aria-label="Buscar conversas" /><kbd>Ctrl F</kbd></label>
         <div className="sidebar-section">
-          <div className="section-label">WORKSPACE <button aria-label="Opções do workspace"><Icon name="more" size={16} /></button></div>
-          <button className="nav-item"><span className="nav-icon"><Icon name="folder" size={16} /></span><span>Projetos</span><span className="nav-count">0</span></button>
-          <button className="nav-item"><span className="nav-icon"><Icon name="chat" size={16} /></span><span>Conversas</span></button>
+          <div className="section-label">Workspace</div>
+          <button className="nav-item" onClick={() => setPanel("project")}><Icon name="folder" size={16} />Projetos</button>
         </div>
         <div className="sidebar-section recent-section">
-          <div className="section-label recent-heading"><span>RECENTES</span><button type="button" className="sidebar-settings-trigger" aria-label="Configurar barra lateral" aria-haspopup="true" aria-expanded={sidebarSettingsOpen} onClick={() => setSidebarSettingsOpen((open) => !open)}><Icon name="more" size={16} /></button></div>
-          {sidebarSettingsOpen && <div className="sidebar-settings-panel" role="region" aria-label="Configurações da barra lateral">
+          <div className="section-label recent-heading"><span>Recentes</span><button type="button" className="sidebar-settings-trigger" aria-label="Configurar barra lateral" title="Configurar barra lateral" aria-controls="sidebar-settings" aria-expanded={sidebarSettingsOpen} onClick={() => setSidebarSettingsOpen((open) => !open)}><Icon name="more" size={16} /></button></div>
+          {sidebarSettingsOpen && <div id="sidebar-settings" className="sidebar-settings-panel" role="region" aria-label="Configurações da barra lateral">
             <fieldset><legend>Organização</legend>
               <label><input type="radio" name="sidebar-organization" checked={sidebarPreferences.organization === "list"} onChange={() => setSidebarPreference("organization", "list")} /> Lista</label>
               <label><input type="radio" name="sidebar-organization" checked={sidebarPreferences.organization === "project"} onChange={() => setSidebarPreference("organization", "project")} /> Por projeto</label>
@@ -789,44 +791,55 @@ function App() {
               <label><input type="radio" name="sidebar-sorting" checked={sidebarPreferences.sorting === "updated"} onChange={() => setSidebarSorting("updated")} /> Última atualização</label>
               <label><input type="radio" name="sidebar-sorting" checked={sidebarPreferences.sorting === "manual"} onChange={() => setSidebarSorting("manual")} /> Manual</label>
             </fieldset>
-            <label className="sidebar-filter-label" htmlFor="sidebar-filter">Exibir</label>
-            <select id="sidebar-filter" value={sidebarPreferences.filter} onChange={(event) => setSidebarPreference("filter", event.target.value as SidebarFilter)}>
-              <option value="all">Todos</option><option value="pinned">Fixadas</option><option value="archived">Arquivadas</option><option value="locked">Trancadas</option>
-            </select>
+            <span className="sidebar-filter-label" id="sidebar-filter-label">Exibir</span>
+            <ThemedSelect<SidebarFilter> id="sidebar-filter" labelId="sidebar-filter-label"
+              value={sidebarPreferences.filter} onChange={(value) => setSidebarPreference("filter", value)}
+              options={[
+                { value: "all", label: "Todos" },
+                { value: "pinned", label: "Fixadas" },
+                { value: "archived", label: "Arquivadas" },
+                { value: "locked", label: "Trancadas" },
+              ]}
+            />
             {sidebarPreferences.filter === "locked" && <p className="sidebar-settings-note">Trancar conversas ainda não está disponível: o app não tem criptografia local em repouso.</p>}
             {sidebarPreferences.organization === "project" && <p className="sidebar-settings-note">O vínculo e o cadastro de projetos ainda não existem. Conversas sem vínculo aparecem em “Sem projeto” até essa integração ser implementada.</p>}
           </div>}
           {conversationNotice && <p className="conversation-notice" role="status" aria-live="polite">{conversationNotice}</p>}
           {sections.map(([section, sectionItems]) => <section className="conversation-group" key={section}>
-          <div className="section-label">{section}</div>
+          <div className="section-label">{section[0] + section.slice(1).toLocaleLowerCase("pt-BR")}</div>
           {sectionItems.length ? orderConversations(sectionItems, sidebarPreferences.sorting, sidebarPreferences.manualOrder).slice(0, section === "RECENTES" && !search && sidebarPreferences.sorting === "updated" ? 8 : sectionItems.length).map((conversation, sectionIndex, visibleSection) => {
             const title = conversation.title ?? "Conversa sem título";
             const sectionIds = visibleSection.map((item) => item.id);
             return <div key={conversation.id} className="conversation-entry" draggable={sidebarPreferences.sorting === "manual"} onDragStart={(event) => { draggedConversationRef.current = conversation.id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", conversation.id); }} onDragOver={(event) => { if (sidebarPreferences.sorting === "manual") event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); const sourceId = draggedConversationRef.current ?? event.dataTransfer.getData("text/plain"); if (sourceId) { dropSidebarConversation(sourceId, conversation.id, sectionItems); suppressSelectionAfterDragRef.current = true; window.setTimeout(() => { suppressSelectionAfterDragRef.current = false; }, 0); } draggedConversationRef.current = null; }} onDragEnd={() => { draggedConversationRef.current = null; }}>
-              <button type="button" onClick={() => { if (suppressSelectionAfterDragRef.current) return; setActiveId(conversation.id); }} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-label={`Abrir conversa: ${title}`}>
+              <button type="button" onClick={() => { if (suppressSelectionAfterDragRef.current) return; setActiveId(conversation.id); }} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={title} aria-current={conversation.id === activeId ? "true" : undefined} aria-label={`Abrir conversa: ${title}`}>
                 <Icon name="chat" size={15} /><span>{title}</span>
               </button>
-              <button type="button" data-conversation-menu-trigger={conversation.id} className="conversation-rename" aria-haspopup="menu" aria-expanded={conversationMenuId === conversation.id} onClick={(event) => { event.stopPropagation(); setConversationMenuId((current) => current === conversation.id ? null : conversation.id); }} onKeyDown={(event) => { if (event.key === "Escape") { setConversationMenuId(null); const id = conversation.id; requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-conversation-menu-trigger="${CSS.escape(id)}"]`)?.focus()); } }} disabled={chatStoreStatus === "checking"} aria-label={`Ações da conversa: ${title}`} title={`Ações: ${title}`}><Icon name="more" size={15} /></button>
-              {conversationMenuId === conversation.id && <div className="conversation-menu" role="menu" aria-label={`Ações para ${title}`} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setConversationMenuId(null); } }} onClick={(event) => event.stopPropagation()}>
-                <button role="menuitem" onClick={() => { setConversationMenuId(null); startRenameConversation(conversation); }}>Renomear</button>
-                <button role="menuitem" onClick={() => updateFlags(conversation, { pinned: !conversation.pinned })}>{conversation.pinned ? "Desafixar" : "Fixar"}</button>
-                <button role="menuitem" onClick={() => updateFlags(conversation, { archived: !conversation.archived })}>{conversation.archived ? "Desarquivar" : "Arquivar"}</button>
+              <button type="button" data-conversation-menu-trigger={conversation.id} className="conversation-rename" aria-haspopup="menu"
+                aria-expanded={conversationMenuId === conversation.id}
+                onClick={(event) => setConversationMenu(conversationMenuId === conversation.id ? null : { id: conversation.id, anchor: event.currentTarget })}
+                disabled={chatStoreStatus === "checking"} aria-label={`Ações da conversa: ${title}`} title={`Ações: ${title}`}>
+                <Icon name="more" size={16} />
+              </button>
+              {conversationMenu?.id === conversation.id && <ConversationMenu anchor={conversationMenu.anchor} label={`Ações para ${title}`} onDismiss={dismissConversationMenu}>
+                <button role="menuitem" tabIndex={-1} onClick={() => { setConversationMenu(null); startRenameConversation(conversation); }}>Renomear</button>
+                <button role="menuitem" tabIndex={-1} onClick={() => updateFlags(conversation, { pinned: !conversation.pinned })}>{conversation.pinned ? "Desafixar" : "Fixar"}</button>
+                <button role="menuitem" tabIndex={-1} onClick={() => updateFlags(conversation, { archived: !conversation.archived })}>{conversation.archived ? "Desarquivar" : "Arquivar"}</button>
                 {sidebarPreferences.sorting === "manual" && <>
-                  <button role="menuitem" disabled={sectionIndex === 0} onClick={() => reorderSidebarConversation(conversation.id, sectionItems, -1)}>Mover para cima</button>
-                  <button role="menuitem" disabled={sectionIndex === sectionIds.length - 1} onClick={() => reorderSidebarConversation(conversation.id, sectionItems, 1)}>Mover para baixo</button>
+                  <button role="menuitem" tabIndex={-1} disabled={sectionIndex === 0} onClick={() => reorderSidebarConversation(conversation.id, sectionItems, -1)}>Mover para cima</button>
+                  <button role="menuitem" tabIndex={-1} disabled={sectionIndex === sectionIds.length - 1} onClick={() => reorderSidebarConversation(conversation.id, sectionItems, 1)}>Mover para baixo</button>
                 </>}
-                <button role="menuitem" onClick={() => void shareConversation(conversation, "copy")}>Copiar conversa</button>
-                <button role="menuitem" onClick={() => void shareConversation(conversation, "export")}>Exportar Markdown</button>
-                <button role="menuitem" disabled title="Indisponível: o app ainda não dispõe de criptografia local para proteger dados em repouso.">Trancar · indisponível</button>
-                <button role="menuitem" className="destructive" onClick={() => { setDeleteDialogId(conversation.id); setConversationMenuId(null); }}>Excluir…</button>
-              </div>}
+                <button role="menuitem" tabIndex={-1} onClick={() => void shareConversation(conversation, "copy")}>Copiar conversa</button>
+                <button role="menuitem" tabIndex={-1} onClick={() => void shareConversation(conversation, "export")}>Exportar Markdown</button>
+                <button role="menuitem" tabIndex={-1} disabled title="Indisponível: o app ainda não dispõe de criptografia local para proteger dados em repouso.">Trancar · indisponível</button>
+                <button role="menuitem" tabIndex={-1} className="destructive" onClick={() => { setDeleteDialogId(conversation.id); setConversationMenu(null); }}>Excluir…</button>
+              </ConversationMenu>}
             </div>;
           }) : <p className="empty-recent">{section === "TRANCADAS" ? "Nenhuma conversa trancada. A proteção ainda não está disponível." : section === "ARQUIVADAS" ? "Nenhuma conversa arquivada corresponde ao filtro." : section === "FIXADAS" ? "Nenhuma conversa fixada corresponde ao filtro." : "Nenhuma conversa corresponde ao filtro."}</p>}
           </section>)}
         </div>
         <div className="sidebar-bottom">
           <div className="local-badge"><span className="pulse-dot" /> Seus dados ficam neste dispositivo</div>
-          <button className="profile-button" onClick={() => setPanel("ai")}><div className="avatar">G</div><div className="profile-copy"><strong>Workspace local</strong><span>Configurações</span></div><Icon name="settings" size={17} /></button>
+          <button className="profile-button" onClick={() => setPanel("ai")}><div className="profile-copy"><strong>Workspace local</strong><span>Configurações</span></div><Icon name="settings" size={16} /></button>
         </div>
       </aside>
 
@@ -841,29 +854,28 @@ function App() {
         aria-valuenow={layoutWidths.sidebarWidth}
         aria-valuetext={`${layoutWidths.sidebarWidth} pixels`}
         tabIndex={0}
-        onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerDown={(event) => startResize("sidebar", event)}
         onPointerMove={(event) => resizeFromPointer("sidebar", event)}
-        onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        onLostPointerCapture={(event) => { if (resizeStart.current?.pointerId === event.pointerId) resizeStart.current = null; }}
         onKeyDown={(event) => resizeFromKeyboard("sidebar", event)}
       />
 
       <main id="main-area" className="main-area">
         <header className="topbar">
           <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong tabIndex={0} title={active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"} aria-label={active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}>{active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}</strong></div>
-          <div className="topbar-actions"><div className="model-chip"><span className={`status-dot ${serviceStatus === "checking" ? "checking" : serviceStatus === "available" ? "online" : "offline"}`} />{model}<Icon name="chevron" size={13} /></div><button className="icon-button" aria-label="Mais opções"><Icon name="more" /></button><div className="top-avatar">G</div></div>
+          <div className="topbar-actions"><button type="button" className="model-chip" onClick={() => setPanel("ai")} title={model + " · " + overallStatusLabel} aria-label={"Configurar Ollama: " + overallStatusLabel}><span className={`status-dot ${serviceStatus === "checking" ? "checking" : serviceStatus === "available" ? "online" : "offline"}`} /><span className="model-chip-name">{model}</span><Icon name="settings" size={14} /></button></div>
         </header>
 
         <section className={`chat-view ${active?.messages.length ? "has-messages" : ""}`}>
           {!active?.messages.length ? (
             <div className="welcome-wrap">
-              <div className="welcome-orb"><div className="orb-core"><Icon name="spark" size={25} /></div><span className="orb-ring ring-one" /><span className="orb-ring ring-two" /></div>
-              <div className="eyebrow"><span className="pulse-dot" /> ASSISTENTE LOCAL</div>
+              <div className="welcome-mark"><Icon name="spark" size={32} /></div>
               <h1>Bom dia, Gabriel<span>.</span></h1>
               <p className="welcome-subtitle">No que vamos trabalhar hoje?</p>
               <div className="suggestion-grid">
-                <button className="suggestion-card" onClick={() => updateActiveDraft("Como está o desempenho do meu computador?")}><span className="suggestion-icon violet"><Icon name="cpu" /></span><span><strong>Verificar meu sistema</strong><small>Acompanhe o desempenho do computador</small></span><Icon name="chevron" size={15} /></button>
-                <button className="suggestion-card" onClick={() => updateActiveDraft("Me ajude a planejar meu próximo projeto.")}><span className="suggestion-icon blue"><Icon name="folder" /></span><span><strong>Começar um projeto</strong><small>Organize ideias e próximos passos</small></span><Icon name="chevron" size={15} /></button>
-                <button className="suggestion-card" onClick={() => updateActiveDraft("Explique como posso usar modelos locais com Ollama.")}><span className="suggestion-icon amber"><Icon name="spark" /></span><span><strong>Explorar IA local</strong><small>Converse com seu modelo no Ollama</small></span><Icon name="chevron" size={15} /></button>
+                <button className="suggestion-card" onClick={() => { textarea.current?.focus(); updateActiveDraft("Como está o desempenho do meu computador?"); }}><span className="suggestion-icon violet"><Icon name="cpu" /></span><span><strong>Verificar meu sistema</strong><small>Acompanhe o desempenho do computador</small></span><Icon name="chevron" size={15} /></button>
+                <button className="suggestion-card" onClick={() => { textarea.current?.focus(); updateActiveDraft("Me ajude a planejar meu próximo projeto."); }}><span className="suggestion-icon blue"><Icon name="folder" /></span><span><strong>Começar um projeto</strong><small>Organize ideias e próximos passos</small></span><Icon name="chevron" size={15} /></button>
+                <button className="suggestion-card" onClick={() => { textarea.current?.focus(); updateActiveDraft("Explique como posso usar modelos locais com Ollama."); }}><span className="suggestion-icon amber"><Icon name="spark" /></span><span><strong>Explorar IA local</strong><small>Converse com seu modelo no Ollama</small></span><Icon name="chevron" size={15} /></button>
               </div>
             </div>
           ) : (
@@ -888,13 +900,13 @@ function App() {
             </div>
           )}
           {(chatStoreError || chatStoreWarning) && <div className={`notice-banner ${chatStoreError ? "storage-error" : "storage-warning"}`} role={chatStoreError ? "alert" : "status"}><span>!</span><p>{chatStoreError ? `Banco SQLite de conversas indisponível: ${chatStoreError}. As conversas continuam no armazenamento local do navegador.` : chatStoreWarning}</p></div>}
-          {errorsByConversation[active.id] && <div className="notice-banner"><span>!</span><p>{errorsByConversation[active.id]}</p><button onClick={() => setErrorsByConversation((items) => { const next = { ...items }; delete next[active.id]; return next; })}>Fechar</button></div>}
+          {errorsByConversation[active.id] && <div className="notice-banner" role="alert"><span aria-hidden="true">!</span><p>{errorsByConversation[active.id]}</p><button onClick={() => setErrorsByConversation((items) => { const next = { ...items }; delete next[active.id]; return next; })}>Fechar</button></div>}
           <div className="composer-area">
           {showJumpToLatest && active.messages.length > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label="Voltar ao final da conversa" title="Voltar ao final da conversa"><Icon name="chevron" size={14} /><span>Mensagens recentes</span></button>}
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
-              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => updateActiveDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" aria-describedby="composer-hint" />
-              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
+              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => updateActiveDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" aria-describedby="composer-hint" />
+              <div className="composer-bottom"><div className="composer-tools"><span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem" title="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
           </div>
@@ -913,14 +925,14 @@ function App() {
         aria-valuenow={layoutWidths.dashboardWidth}
         aria-valuetext={`${layoutWidths.dashboardWidth} pixels`}
         tabIndex={0}
-        onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); }}
+        onPointerDown={(event) => startResize("dashboard", event)}
         onPointerMove={(event) => resizeFromPointer("dashboard", event)}
-        onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+        onLostPointerCapture={(event) => { if (resizeStart.current?.pointerId === event.pointerId) resizeStart.current = null; }}
         onKeyDown={(event) => resizeFromKeyboard("dashboard", event)}
       />
 
       <aside id="right-rail" className="right-rail">
-        <div className="dashboard-head"><div><span className="section-label">CENTRAL DE CONTROLE</span><h2>Dashboard</h2></div><button className="icon-button" aria-label="Recolher painel"><Icon name="more" /></button></div>
+        <div className="dashboard-head"><h2>Dashboard</h2></div>
         <div className="dashboard-tabs" role="tablist" aria-label="Painel do dashboard">
           {(dashboardTabs as Panel[]).map((tab) => <button
             key={tab}
@@ -943,21 +955,24 @@ function App() {
         </div>
         <div id="dashboard-panel" className="dashboard-tabpanel" role="tabpanel" aria-label="Conteúdo do dashboard" aria-labelledby={`dashboard-tab-${panel}`} tabIndex={0}>
           {panel === "system" && <SystemDashboard />}
-          {panel === "ai" && <div className="dashboard-content" tabIndex={0} aria-label="Configuração do modelo e serviço"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
-          {panel === "project" && <div className="dashboard-content project-empty" tabIndex={0} aria-label="Projetos"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
+          {panel === "ai" && <div className="dashboard-content" tabIndex={0} aria-label="Configuração do modelo e serviço"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">Modelo ativo</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><div className="model-select-label"><span id="keep-alive-label">Manter modelo carregado</span>
+            <ThemedSelect id="keep-alive" labelId="keep-alive-label" value={keepAlive} onChange={setKeepAlive}
+              options={[
+                { value: "0", label: "Descarregar ao terminar" },
+                { value: "5m", label: "5 minutos" },
+                { value: "10m", label: "10 minutos" },
+              ]}
+            />
+          </div><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
+          {panel === "project" && <div className="dashboard-content project-empty" tabIndex={0} aria-label="Projetos"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>O cadastro e o vínculo de projetos ainda estão indisponíveis.</p></div>}
         </div>
-        <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>
       </aside>
-      {renameDialog && renameValidation && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeRenameDialog(); }}>
-        <section className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title" onKeyDown={(event) => {
-          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeRenameDialog(); }
-        }}>
+      {renameDialog && renameValidation && <ConversationDialog labelId="rename-dialog-title" onDismiss={closeRenameDialog}>
           <h2 id="rename-dialog-title">Renomear conversa</h2>
           <form onSubmit={saveConversationTitle}>
             <label htmlFor="conversation-title-input">Nome da conversa</label>
             <input
               id="conversation-title-input"
-              ref={renameInput}
               value={renameDialog.value}
               onChange={(event) => setRenameDialog((current) => current ? { ...current, value: event.target.value } : current)}
               aria-invalid={!renameValidation.valid}
@@ -972,9 +987,15 @@ function App() {
               <button type="submit" className="rename-save" disabled={!renameValidation.valid}>Salvar nome</button>
             </div>
           </form>
-        </section>
-      </div>}
-      {deleteDialogId && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteDialogId(null); }}><section className="rename-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-description" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setDeleteDialogId(null); } }}><h2 id="delete-dialog-title">Excluir conversa?</h2><p id="delete-dialog-description">Esta ação remove a conversa e suas mensagens salvas deste dispositivo. Não pode ser desfeita.</p><div className="rename-dialog-actions"><button type="button" onClick={() => setDeleteDialogId(null)}>Cancelar</button><button type="button" className="rename-save destructive" onClick={confirmDeleteConversation}>Excluir conversa</button></div></section></div>}
+      </ConversationDialog>}
+      {deleteDialogId && <ConversationDialog labelId="delete-dialog-title" descriptionId="delete-dialog-description" onDismiss={closeDeleteDialog}>
+        <h2 id="delete-dialog-title">Excluir conversa?</h2>
+        <p id="delete-dialog-description">Esta ação remove a conversa e suas mensagens salvas deste dispositivo. Não pode ser desfeita.</p>
+        <div className="rename-dialog-actions">
+          <button type="button" onClick={closeDeleteDialog}>Cancelar</button>
+          <button type="button" className="rename-save destructive" onClick={confirmDeleteConversation}>Excluir conversa</button>
+        </div>
+      </ConversationDialog>}
     </div>
   );
 }

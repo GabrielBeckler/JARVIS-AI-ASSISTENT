@@ -34,3 +34,17 @@ test("pointer and keyboard resizing update either rail and respect bounds", () =
   assert.equal(minSidebar.sidebarWidth, SIDEBAR_MIN_WIDTH);
   assert.deepEqual(restoreLayoutWidths(JSON.stringify(maxSidebar)), maxSidebar);
 });
+
+test("compact windows constrain only the visible layout and resizing one rail keeps the other", () => {
+  const preferred = { sidebarWidth: 320, dashboardWidth: 380 };
+  const compact = clampLayoutWidths(preferred, 1000);
+  assert.deepEqual(clampLayoutWidths(preferred, 1440), preferred);
+  assert.deepEqual(restoreLayoutWidths(JSON.stringify(preferred)), preferred);
+  const leftLimit = getLayoutLimits(compact, 1000).sidebar.max;
+  assert.deepEqual(resizeLayoutArea(compact, "sidebar", 1000, 1000), { ...compact, sidebarWidth: leftLimit });
+  const roomierSidebar = resizeLayoutArea(compact, "sidebar", -70, 1000);
+  assert.ok(roomierSidebar.sidebarWidth < compact.sidebarWidth);
+  assert.equal(roomierSidebar.dashboardWidth, compact.dashboardWidth);
+  const rightLimit = getLayoutLimits(roomierSidebar, 1000).dashboard.max;
+  assert.deepEqual(resizeLayoutArea(roomierSidebar, "dashboard", 1000, 1000), { ...roomierSidebar, dashboardWidth: rightLimit });
+});

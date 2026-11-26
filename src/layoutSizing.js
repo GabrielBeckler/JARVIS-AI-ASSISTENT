@@ -5,6 +5,8 @@ export const DASHBOARD_MIN_WIDTH = 240;
 export const DASHBOARD_MAX_WIDTH = 420;
 export const CHAT_MIN_WIDTH = 420;
 export const DIVIDER_WIDTH = 7;
+const THREE_PANEL_MIN_WIDTH = SIDEBAR_MIN_WIDTH + DASHBOARD_MIN_WIDTH + CHAT_MIN_WIDTH + DIVIDER_WIDTH * 2;
+const clamp = (value, min, max) => Math.min(Math.max(Math.round(value), min), max);
 
 export const defaultLayoutWidths = Object.freeze({ sidebarWidth: 238, dashboardWidth: 304 });
 
@@ -24,30 +26,28 @@ export function restoreLayoutWidths(saved) {
 
 /** @param {{sidebarWidth: number, dashboardWidth: number}} widths @param {number} containerWidth */
 export function clampLayoutWidths(widths, containerWidth) {
-  const availableForRails = Math.max(0, containerWidth - CHAT_MIN_WIDTH - DIVIDER_WIDTH * 2);
-  const sideMax = Math.max(0, Math.min(SIDEBAR_MAX_WIDTH, availableForRails - DASHBOARD_MIN_WIDTH));
-  const sidebarWidth = Math.min(Math.max(widths.sidebarWidth, Math.min(SIDEBAR_MIN_WIDTH, sideMax)), sideMax);
-  const dashboardMax = Math.max(0, Math.min(DASHBOARD_MAX_WIDTH, availableForRails - sidebarWidth));
-  const dashboardWidth = Math.min(Math.max(widths.dashboardWidth, Math.min(DASHBOARD_MIN_WIDTH, dashboardMax)), dashboardMax);
-  return { sidebarWidth: Math.round(sidebarWidth), dashboardWidth: Math.round(dashboardWidth) };
+  const room = Math.floor(containerWidth) - CHAT_MIN_WIDTH - DIVIDER_WIDTH * 2;
+  const sidebarMax = containerWidth < THREE_PANEL_MIN_WIDTH
+    ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, room + DIVIDER_WIDTH))
+    : Math.min(SIDEBAR_MAX_WIDTH, room - DASHBOARD_MIN_WIDTH);
+  const sidebarWidth = clamp(widths.sidebarWidth, SIDEBAR_MIN_WIDTH, sidebarMax);
+  const dashboardWidth = clamp(widths.dashboardWidth, DASHBOARD_MIN_WIDTH, Math.min(DASHBOARD_MAX_WIDTH, Math.max(DASHBOARD_MIN_WIDTH, room - sidebarWidth)));
+  return { sidebarWidth, dashboardWidth };
 }
 
 /** @param {{sidebarWidth: number, dashboardWidth: number}} widths @param {"sidebar"|"dashboard"} area @param {number} delta @param {number} containerWidth */
 export function resizeLayoutArea(widths, area, delta, containerWidth) {
-  return clampLayoutWidths({
-    ...widths,
-    [area === "sidebar" ? "sidebarWidth" : "dashboardWidth"]: widths[area === "sidebar" ? "sidebarWidth" : "dashboardWidth"] + delta,
-  }, containerWidth);
+  const key = area === "sidebar" ? "sidebarWidth" : "dashboardWidth";
+  const { min, max } = getLayoutLimits(widths, containerWidth)[area];
+  return { ...widths, [key]: clamp(widths[key] + delta, min, max) };
 }
 
 /** @param {{sidebarWidth: number, dashboardWidth: number}} widths @param {number} containerWidth */
 export function getLayoutLimits(widths, containerWidth) {
-  const availableForRails = Math.max(0, containerWidth - CHAT_MIN_WIDTH - DIVIDER_WIDTH * 2);
-  const sidebarMax = Math.max(0, Math.min(SIDEBAR_MAX_WIDTH, availableForRails - DASHBOARD_MIN_WIDTH));
-  const sidebarWidth = Math.min(Math.max(widths.sidebarWidth, 0), sidebarMax);
-  const dashboardMax = Math.max(0, Math.min(DASHBOARD_MAX_WIDTH, availableForRails - sidebarWidth));
+  const room = Math.floor(containerWidth) - CHAT_MIN_WIDTH - DIVIDER_WIDTH * 2;
+  const sidebarRoom = containerWidth < THREE_PANEL_MIN_WIDTH ? room + DIVIDER_WIDTH : room - widths.dashboardWidth;
   return {
-    sidebar: { min: Math.min(SIDEBAR_MIN_WIDTH, sidebarMax), max: sidebarMax },
-    dashboard: { min: Math.min(DASHBOARD_MIN_WIDTH, dashboardMax), max: dashboardMax },
+    sidebar: { min: SIDEBAR_MIN_WIDTH, max: clamp(sidebarRoom, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH) },
+    dashboard: { min: DASHBOARD_MIN_WIDTH, max: clamp(room - widths.sidebarWidth, DASHBOARD_MIN_WIDTH, DASHBOARD_MAX_WIDTH) },
   };
 }
