@@ -3,6 +3,8 @@ import { appendAssistantOnce, captureScrollPosition, createRequestContext, isCur
 import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import { MarkdownMessage } from "./MarkdownMessage.js";
+import { SystemDashboard } from "./SystemDashboard";
+import { initializeChatStore, persistChatStore } from "./chatStore";
 import "./App.css";
 
 type Message = StoredMessage;
@@ -10,6 +12,7 @@ type Conversation = StoredConversation;
 type Panel = "system" | "ai" | "project";
 type ServiceStatus = "checking" | "available" | "unavailable";
 type ModelStatus = "checking" | "missing" | "ready" | "unknown";
+type ChatStoreStatus = "checking" | "ready" | "failed";
 type StreamState = { requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
 
 function durationLabel(milliseconds: number | null | undefined): string {
@@ -62,6 +65,9 @@ function messageTime(createdAt?: number): string {
 
 function App() {
   const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const [chatStoreStatus, setChatStoreStatus] = useState<ChatStoreStatus>("checking");
+  const [chatStoreError, setChatStoreError] = useState("");
+  const [chatStoreWarning, setChatStoreWarning] = useState("");
   const [activeId, setActiveId] = useState(conversations[0]?.id ?? starter.id);
   const [draft, setDraft] = useState("");
   const [search, setSearch] = useState("");
@@ -81,12 +87,13 @@ function App() {
   const [statusError, setStatusError] = useState("");
   const activeRequestsRef = useRef(new Map<string, string>());
   const firstContentVisibleRef = useRef(new Map<string, number>());
+  const preserveLegacyCopyRef = useRef(false);
   const statusCheckRef = useRef(0);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const scrollPositionsRef = useRef(new Map<string, { scrollTop: number; followBottom: boolean }>());
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
-  const recent = conversations.filter((conversation) => conversation.messages.length > 0 && conversation.title.toLowerCase().includes(search.toLowerCase()));
+  const recent = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
   const activeRequestId = activeRequests[active.id];
   const activeStream = streamingByConversation[active.id];
   const overallStatusLabel = serviceStatus === "checking" || (serviceStatus === "available" && modelStatus === "checking")
@@ -100,8 +107,55 @@ function App() {
         : modelStatus === "ready" ? "ready" : "unknown";
 
   useEffect(() => {
-    localStorage.setItem("jarvis.conversations", JSON.stringify(conversations));
-  }, [conversations]);
+    let mounted = true;
+    let legacyJson: string | null = null;
+    try { legacyJson = localStorage.getItem("jarvis.conversations"); } catch { /* SQLite remains the source of truth if browser storage is unavailable. */ }
+    void initializeChatStore(legacyJson).then((result) => {
+      if (!mounted) return;
+      if (result.importStatus === "invalid" && result.conversations.length === 0) {
+        preserveLegacyCopyRef.current = true;
+        setChatStoreWarning(`Histórico antigo mantido no navegador; importação ignorada: ${result.warning ?? "formato inválido"}.`);
+      } else {
+        setConversations(result.conversations);
+        setActiveId((currentId) => result.conversations.some((conversation) => conversation.id === currentId)
+          ? currentId : result.conversations[0]?.id ?? starter.id);
+        if (result.importStatus === "invalid") {
+          preserveLegacyCopyRef.current = true;
+          setChatStoreWarning(`Histórico do banco carregado; cópia antiga mantida sem alteração: ${result.warning ?? "formato inválido"}.`);
+        }
+      }
+      setChatStoreStatus("ready");
+    }).catch((error) => {
+      if (!mounted) return;
+      setChatStoreStatus("failed");
+      setChatStoreError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (chatStoreStatus === "checking") return;
+    if (chatStoreStatus === "failed") {
+      try {
+        localStorage.setItem("jarvis.conversations", JSON.stringify(conversations));
+      } catch {
+        setChatStoreWarning("O histórico SQLite está indisponível e o armazenamento local do navegador não pôde ser atualizado.");
+      }
+      return;
+    }
+    void persistChatStore(conversations).then(() => {
+      setChatStoreError("");
+      if (!preserveLegacyCopyRef.current) {
+        try {
+          localStorage.setItem("jarvis.conversations", JSON.stringify(conversations));
+        } catch {
+          setChatStoreWarning("O banco SQLite foi atualizado, mas a cópia de compatibilidade do navegador não pôde ser atualizada.");
+        }
+      }
+    }).catch((error) => {
+      setChatStoreError(error instanceof Error ? error.message : String(error));
+    });
+  }, [conversations, chatStoreStatus]);
 
   useEffect(() => {
     localStorage.setItem("jarvis.ollama.keepAlive", keepAlive);
@@ -192,6 +246,7 @@ function App() {
 
   const sendMessage = async (event?: FormEvent, retryMessageId?: string) => {
     event?.preventDefault();
+    if (chatStoreStatus === "checking") return;
     const conversation = conversations.find((item) => item.id === activeId);
     if (!conversation || activeRequestsRef.current.has(conversation.id)) return;
     const retrying = retryMessageId
@@ -232,7 +287,7 @@ function App() {
         : [...item.messages, userMessage];
       return {
         ...item,
-        title: item.messages.length ? item.title : content.slice(0, 36),
+        title: item.messages.length ? (item.title ?? content.slice(0, 36)) : content.slice(0, 36),
         updatedAt: now,
         messages,
       };
@@ -347,7 +402,7 @@ function App() {
           <div className="brand-mark"><Icon name="spark" size={19} /></div>
           <div><strong>JARVIS</strong><span>LOCAL INTELLIGENCE</span></div>
         </div>
-        <button className="new-chat" onClick={newConversation}><Icon name="plus" size={17} /><span>Nova conversa</span><kbd>⌘ K</kbd></button>
+        <button className="new-chat" onClick={newConversation} disabled={chatStoreStatus === "checking"}><Icon name="plus" size={17} /><span>{chatStoreStatus === "checking" ? "Restaurando histórico…" : "Nova conversa"}</span><kbd>⌘ K</kbd></button>
         <label className="search-box"><Icon name="search" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversas" /><kbd>⌘ F</kbd></label>
         <div className="sidebar-section">
           <div className="section-label">WORKSPACE <button aria-label="Opções do workspace"><Icon name="more" size={16} /></button></div>
@@ -357,8 +412,8 @@ function App() {
         <div className="sidebar-section recent-section">
           <div className="section-label">RECENTES <button aria-label="Ordenar conversas"><Icon name="more" size={16} /></button></div>
           {recent.length ? recent.slice(0, 8).map((conversation) => (
-            <button key={conversation.id} onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={conversation.title}>
-              <Icon name="chat" size={15} /><span>{conversation.title}</span>
+            <button key={conversation.id} onClick={() => setActiveId(conversation.id)} className={`conversation-link ${conversation.id === activeId ? "selected" : ""}`} title={conversation.title ?? "Conversa sem título"}>
+              <Icon name="chat" size={15} /><span>{conversation.title ?? "Conversa sem título"}</span>
             </button>
           )) : <p className="empty-recent">Suas conversas aparecerão aqui.</p>}
         </div>
@@ -370,7 +425,7 @@ function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong>{active?.messages.length ? active.title : "Nova conversa"}</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong>{active?.messages.length ? active.title ?? "Conversa sem título" : "Nova conversa"}</strong></div>
           <div className="topbar-actions"><div className="model-chip"><span className={`status-dot ${serviceStatus === "checking" ? "checking" : serviceStatus === "available" ? "online" : "offline"}`} />{model}<Icon name="chevron" size={13} /></div><button className="icon-button" aria-label="Mais opções"><Icon name="more" /></button><div className="top-avatar">G</div></div>
         </header>
 
@@ -404,11 +459,12 @@ function App() {
               <div className="message-end" />
             </div>
           )}
+          {(chatStoreError || chatStoreWarning) && <div className={`notice-banner ${chatStoreError ? "storage-error" : "storage-warning"}`} role={chatStoreError ? "alert" : "status"}><span>!</span><p>{chatStoreError ? `Banco SQLite de conversas indisponível: ${chatStoreError}. As conversas continuam no armazenamento local do navegador.` : chatStoreWarning}</p></div>}
           {errorsByConversation[active.id] && <div className="notice-banner"><span>!</span><p>{errorsByConversation[active.id]}</p><button onClick={() => setErrorsByConversation((items) => { const next = { ...items }; delete next[active.id]; return next; })}>Fechar</button></div>}
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
               <textarea ref={textarea} rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Jarvis..." aria-label="Mensagem" />
-              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim()} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
+              <div className="composer-bottom"><div className="composer-tools"><button type="button" className="tool-button mic-button" title="Áudio ainda não configurado" aria-label="Microfone indisponível"><Icon name="mic" size={17} /></button><span className="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
           </div>
@@ -420,15 +476,7 @@ function App() {
         <div className="dashboard-tabs" role="tablist">
           {(["system", "ai", "project"] as Panel[]).map((tab) => <button key={tab} role="tab" aria-selected={panel === tab} onClick={() => setPanel(tab)} className={panel === tab ? "active" : ""}>{tab === "system" ? "Sistema" : tab === "ai" ? "IA" : "Projeto"}</button>)}
         </div>
-        {panel === "system" && <div className="dashboard-content">
-          <div className="system-summary"><div className="summary-icon"><Icon name="cpu" size={17} /></div><div><strong>Seu sistema</strong><span>Fedora Linux · Wayland</span></div><span className="live-label unavailable"><i /> SENSORES N/D</span></div>
-          <div className="metric-card"><div className="metric-head"><span><Icon name="cpu" size={15} /> Processador</span><span className="metric-value na">N/D</span></div><div className="metric-track" /><div className="metric-foot"><span>Intel Core i5-12450H</span><span>Uso indisponível</span></div></div>
-          <div className="metric-card"><div className="metric-head"><span><Icon name="memory" size={15} /> Memória RAM</span><span className="metric-value na">N/D</span></div><div className="metric-track" /><div className="metric-foot"><span>16 GB total</span><span>Uso indisponível</span></div></div>
-          <div className="metric-card"><div className="metric-head"><span><Icon name="gpu" size={15} /> GPU</span><span className="metric-value na">N/D</span></div><div className="metric-track" /><div className="metric-foot"><span>NVIDIA RTX 2050 · 4 GB</span><span>Sensores indisponíveis</span></div></div>
-          <div className="temperature-card"><div className="temperature-copy"><span className="section-label">TEMPERATURAS</span><strong>Monitoramento nativo</strong><small>Requer integração com sensores do sistema</small></div><div className="temperature-reading">—°<span>C</span></div></div>
-          <div className="chart-card"><div className="chart-title"><span>Atividade recente</span><span>ÚLTIMOS 60S</span></div><div className="chart-placeholder"><div className="chart-grid"><i /><i /><i /></div><div className="chart-empty">Aguardando dados do sistema</div></div><div className="chart-legend"><span><i className="violet-dot" />CPU</span><span><i className="blue-dot" />RAM</span><span><i className="amber-dot" />GPU</span></div></div>
-          <div className="system-footer"><span className="pulse-dot" /> Coleta de sensores não configurada</div>
-        </div>}
+        {panel === "system" && <SystemDashboard />}
         {panel === "ai" && <div className="dashboard-content"><div className="ai-card"><div className="ai-card-top"><span className="ai-symbol"><Icon name="spark" size={18} /></span><span className={`connection-status ${statusClass}`}>{overallStatusLabel}</span></div><span className="section-label">MODELO ATIVO</span><strong className="model-name">{model}</strong><p className="service-availability">Serviço: {serviceStatus === "checking" ? "verificando" : serviceStatus === "available" ? "disponível" : "indisponível"}</p><p className={`model-availability ${modelStatus === "missing" ? "missing" : ""}`}>Modelo: {modelStatus === "checking" ? "verificando" : modelStatus === "ready" ? "pronto" : modelStatus === "missing" ? "ausente" : "desconhecido"}</p>{statusError && <p className="status-error">{statusError}</p>}<label className="model-select-label">Modelo<input value={model} onChange={(event) => { modelRef.current = event.target.value; setModel(event.target.value); setModelStatus("checking"); }} aria-label="Nome do modelo Ollama" /></label><label className="model-select-label">Manter modelo carregado<select value={keepAlive} onChange={(event) => setKeepAlive(event.target.value)} aria-label="Tempo para manter o modelo carregado"><option value="0">Descarregar ao terminar</option><option value="5m">5 minutos</option><option value="10m">10 minutos</option></select></label><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
         {panel === "project" && <div className="dashboard-content project-empty"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>Vincule uma conversa a um projeto para manter instruções e contexto organizados.</p><button className="outline-action" onClick={() => setErrorsByConversation((items) => ({ ...items, [active.id]: "O cadastro de projetos será habilitado em uma próxima etapa." }))}>Explorar projetos <Icon name="chevron" size={14} /></button></div>}
         <div className="right-footer"><span>JARVIS AI <b>·</b> BUILD 0.1</span><span>LOCAL FIRST</span></div>

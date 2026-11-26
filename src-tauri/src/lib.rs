@@ -1,4 +1,6 @@
+mod chat_store;
 mod ollama;
+mod system_metrics;
 
 use serde::Serialize;
 use std::{
@@ -102,10 +104,14 @@ fn ollama_cancel_chat(request_id: String) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_sql::Builder::new().build())
+        .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
+            chat_store::chat_store_database_url,
+            chat_store::initialize_chat_store,
+            chat_store::save_chat_store,
+            system_metrics::system_snapshot,
             ollama_list_models,
             ollama_chat,
             ollama_cancel_chat

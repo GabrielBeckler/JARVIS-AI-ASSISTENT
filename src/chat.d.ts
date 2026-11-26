@@ -1,6 +1,6 @@
 import type { StoredMessage } from "./ollama.js";
 
-export type StoredConversation = { id: string; title: string; updatedAt: number; messages: StoredMessage[] };
+export type StoredConversation = { id: string; title?: string; updatedAt?: number; messages: StoredMessage[] };
 
 export function restoreConversations(saved: string | null, starter: StoredConversation[]): StoredConversation[];
 export function updateMessage(
