@@ -30,6 +30,13 @@ test("detects computer questions and system-related temperature follow-ups", () 
   assert.equal(isSystemQuestion("Qual temperatura para assar pão?"), false);
 });
 
+test("keeps hardware definitions out of the system snapshot flow, including imperfect dictation", () => {
+  const history = [{ role: "user", content: "Como está o desempenho do meu computador?" }];
+  assert.equal(isSystemQuestion("Ei, Aurion, quero que você me fale o que é uma memória RAM em apenas uma frase simples.", history), false);
+  assert.equal(isSystemQuestion("E é a hora que você me faz o que é uma memória, apenas uma frase simples.", history), false);
+  assert.equal(isSystemQuestion("Quanto de memória RAM tem no meu computador?", history), true);
+});
+
 test("includes current relevant hardware fields, units, sample time, and N/D without inventing values", () => {
   const prompt = createSystemContextPrompt("Como está o desempenho do meu computador?", snapshot, { now: 1_100 });
   assert.match(prompt, /Coletado em 1970-01-01T00:00:01\.000Z/);

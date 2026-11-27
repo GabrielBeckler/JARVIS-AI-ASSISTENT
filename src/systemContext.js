@@ -1,8 +1,10 @@
 const systemTerms = /\b(?:meu computador|meu pc|este computador|este pc|sistema|desempenho|performance|hardware|cpu|processador|gpu|placa de v[ií]deo|ram|mem[oó]ria|vram)\b/i;
+const hardwareDefinition = /\bo\s+que\s+(?:[eé]|significa|s[aã]o)\s+(?:(?:o|a|os|as|um|uma)\s+)?(?:mem[oó]ria(?:\s+ram)?|ram|vram|cpu|gpu|processador|placa de v[ií]deo|hardware)\b/i;
 const systemFollowUp = /^\s*(?:e|and)\s+(?:(?:a|o|os|as)\s+)?(?:temperatura|uso|desempenho|performance|cpu|processador|gpu|placa de v[ií]deo|ram|mem[oó]ria|vram|modelo)\b/i;
 
 /** @param {string} prompt @param {readonly {role: string, content: string}[]} [history] */
 export function isSystemQuestion(prompt, history = []) {
+  if (hardwareDefinition.test(prompt)) return false;
   if (systemTerms.test(prompt)) return true;
   if (!/\btemperatura\b/i.test(prompt)) return false;
   const priorSystemQuestion = history.slice(-8).some((message) =>

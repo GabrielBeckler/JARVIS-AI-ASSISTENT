@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager, State, ipc::Channel};
 
 const RATE: u32 = 16_000;
 const RECORD_SECONDS: u32 = 60;
+const MIC_START_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CANCELLED: &str = "Operação de voz interrompida.";
 
@@ -65,14 +66,28 @@ impl Job {
         Ok(())
     }
 
-    fn wait(&self, timeout: Duration, failure: &str, capture: bool) -> Result<(), String> {
+    fn wait(
+        &self,
+        timeout: Duration,
+        failure: &str,
+        mut capture: Option<(&Path, &mut dyn FnMut())>,
+    ) -> Result<(), String> {
         let started = Instant::now();
+        let mut recording_started = false;
         loop {
             self.check_cancelled()?;
             {
                 let mut guard = self.child.lock().expect("voice child lock");
                 let child = guard.as_mut().expect("voice process was started");
-                if let Some(status) = child.try_wait().map_err(|_| failure.to_owned())? {
+                let status = child.try_wait().map_err(|_| failure.to_owned())?;
+                if !recording_started
+                    && let Some((path, on_ready)) = capture.as_mut()
+                    && fs::metadata(*path).is_ok_and(|metadata| metadata.len() >= 2)
+                {
+                    recording_started = true;
+                    on_ready();
+                }
+                if let Some(status) = status {
                     *guard = None;
                     return if status.success() {
                         Ok(())
@@ -81,11 +96,18 @@ impl Job {
                     };
                 }
                 let timed_out = started.elapsed() >= timeout;
-                if timed_out || (capture && self.stop_capture.load(Ordering::SeqCst)) {
+                let capture_stalled = capture.is_some()
+                    && !recording_started
+                    && started.elapsed() >= MIC_START_TIMEOUT;
+                let capture_stopped = capture.is_some() && self.stop_capture.load(Ordering::SeqCst);
+                if timed_out || capture_stalled || capture_stopped {
                     let _ = child.kill();
                     child.wait().map_err(|_| failure.to_owned())?;
                     *guard = None;
-                    return if capture {
+                    if capture_stalled {
+                        return Err(failure.to_owned());
+                    }
+                    return if capture.is_some() {
                         Ok(())
                     } else {
                         Err(format!("{failure} Tempo limite atingido."))
@@ -224,7 +246,12 @@ fn capture(
     recorder: &OsStr,
     mut stage: impl FnMut(&'static str),
 ) -> Result<String, String> {
-    let model = model_file(dir, "ggml-base.bin")?;
+    let model_name = if dir.join("ggml-small.bin").is_file() {
+        "ggml-small.bin"
+    } else {
+        "ggml-base.bin"
+    };
+    let model = model_file(dir, model_name)?;
     let whisper = local_tool(dir, "whisper/bin/whisper-cli", "whisper-cli");
     if whisper == "whisper-cli"
         && !std::env::var_os("PATH").is_some_and(|paths| {
@@ -255,11 +282,10 @@ fn capture(
         .stdout(pcm_file);
     job.spawn(&mut recorder, "pw-record")?;
     let microphone_error = "Falha na gravação. Confira o microfone e a entrada padrão do PipeWire.";
-    stage("recording");
     job.wait(
         Duration::from_secs(RECORD_SECONDS.into()),
         microphone_error,
-        true,
+        Some((&pcm_path, &mut || stage("recording"))),
     )?;
     job.check_cancelled()?;
 
@@ -293,8 +319,8 @@ fn capture(
     job.spawn(&mut command, "whisper-cli")?;
     job.wait(
         Duration::from_secs(180),
-        "O Whisper não conseguiu transcrever. Confira o modelo multilíngue ggml-base.bin.",
-        false,
+        &format!("O Whisper não conseguiu transcrever. Confira o modelo multilíngue {model_name}."),
+        None,
     )?;
     let text = fs::read_to_string(output.with_extension("txt"))
         .map_err(|_| "O Whisper terminou sem criar um arquivo de transcrição.")?;
@@ -345,7 +371,7 @@ fn speak(
     job.wait(
         Duration::from_secs(180),
         "O Piper não conseguiu gerar áudio. Confira a voz pt-BR e o arquivo .onnx.json.",
-        false,
+        None,
     )?;
     let mut playback = Command::new(player);
     playback
@@ -361,7 +387,7 @@ fn speak(
     job.wait(
         Duration::from_secs(900),
         "Não foi possível reproduzir o áudio. Confira a saída padrão do PipeWire.",
-        false,
+        None,
     )
 }
 
@@ -458,6 +484,7 @@ mod tests {
     fn captures_and_transcribes_with_simulated_commands() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("ggml-base.bin"), "fake").unwrap();
+        fs::write(dir.path().join("ggml-small.bin"), "fake").unwrap();
         let recorder = executable(dir.path(), "record", "yes PCM | head -c 6400");
         executable(
             dir.path(),
@@ -465,6 +492,7 @@ mod tests {
             r#"
             while [ "$#" -gt 0 ]; do
                 case "$1" in
+                    -m) shift; test "${1##*/}" = ggml-small.bin ;;
                     -l) shift; test "$1" = pt ;;
                     -f) shift; test "$(head -c 4 "$1")" = RIFF ;;
                     -of) shift; printf ' Olá, Aurion! \n' > "$1.txt" ;;

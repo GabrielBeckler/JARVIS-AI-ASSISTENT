@@ -151,7 +151,7 @@ function App() {
     idle: "",
     waiting: "Aguardando o próximo trecho da resposta…",
     starting: "Abrindo microfone…",
-    recording: "Gravando · até 60 segundos",
+    recording: "Gravando · pode falar",
     transcribing: "Transcrevendo em português…",
     synthesizing: "Preparando a voz…",
     playing: "Reproduzindo a resposta…",

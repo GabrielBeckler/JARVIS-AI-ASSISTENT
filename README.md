@@ -180,6 +180,15 @@ done
 
 O Aurion procura o Whisper e o Piper nos caminhos instalados acima e aceita os executáveis `whisper-cli` e `piper` no PATH como alternativa. Para usar outra pasta com os modelos e executáveis locais, defina `AURION_VOICE_DIR` no ambiente do processo Tauri. O arquivo `ggml-base.bin` deve ser a versão multilíngue. O Whisper recebe `-l pt` e transcreve sem traduzir. A voz Faber é `pt_BR`.
 
+Se o modelo base trocar ou omitir palavras durante o ditado, experimente o Whisper small multilíngue. Ele ocupa mais espaço e pode levar mais tempo para transcrever. O Aurion usa `ggml-small.bin` quando o arquivo está na pasta de voz e usa `ggml-base.bin` quando o small está ausente.
+
+```bash
+voice_dir="${XDG_DATA_HOME:-$HOME/.local/share}/br.com.jarvis.ai/voice"
+curl -fL --retry 2 -o "$voice_dir/ggml-small.bin.part" \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin &&
+mv "$voice_dir/ggml-small.bin.part" "$voice_dir/ggml-small.bin"
+```
+
 ### Fontes e licenças
 
 - O [whisper.cpp](https://github.com/ggml-org/whisper.cpp/blob/v1.9.6/LICENSE) e os [pesos Whisper em formato GGML](https://huggingface.co/ggerganov/whisper.cpp) usam MIT.
@@ -188,7 +197,7 @@ O Aurion procura o Whisper e o Piper nos caminhos instalados acima e aceita os e
 ### Teste no Aurion
 
 1. Confira os dispositivos padrão no painel de som do Fedora ou com `wpctl status`. Abra o aplicativo com `npm run tauri dev` e confirme que o modelo Ollama aparece como pronto na aba **IA**.
-2. Clique no microfone, fale em português e clique novamente para transcrever. A gravação também termina ao atingir 60 segundos. Revise a transcrição no campo de mensagem e clique em enviar. Se já havia texto no campo, a transcrição é acrescentada.
+2. Clique no microfone, espere aparecer **Gravando · pode falar**, fale em português e clique novamente para transcrever. A gravação também termina ao atingir 60 segundos. Revise a transcrição no campo de mensagem e clique em enviar. Se já havia texto no campo, a transcrição é acrescentada.
 3. Aguarde a primeira frase da resposta. Em um envio por ditado, o Aurion sintetiza trechos em ordem enquanto o Ollama ainda pode estar gerando. O texto completo aparece normalmente. Use o botão de voz para interromper a leitura sem cancelar o chat. **Ouvir resposta** também permite reproduzir uma resposta escrita ou já salva.
 4. Confira que é possível continuar digitando e enviando mensagens quando as ferramentas de voz estão ausentes.
 
