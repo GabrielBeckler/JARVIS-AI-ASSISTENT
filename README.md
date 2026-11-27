@@ -1,4 +1,4 @@
-# JARVIS AI
+# AURION AI
 
 Assistente desktop local em desenvolvimento, feito com Tauri 2, React, TypeScript e Rust. O projeto tem como plataforma alvo o Fedora Linux com KDE Plasma e Wayland, com conversas realizadas por meio de um servidor Ollama local.
 
@@ -21,7 +21,7 @@ Assistente desktop local em desenvolvimento, feito com Tauri 2, React, TypeScrip
 
 ## Visão geral
 
-O objetivo do JARVIS AI é oferecer um assistente pessoal que funcione localmente, converse em português brasileiro e, ao longo das próximas fases, ajude a acompanhar o computador e organizar projetos de desenvolvimento.
+O objetivo do AURION AI é oferecer um assistente pessoal que funcione localmente, converse em português brasileiro e, ao longo das próximas fases, ajude a acompanhar o computador e organizar projetos de desenvolvimento.
 
 | Área | Tecnologia ou alvo |
 | --- | --- |
@@ -184,7 +184,7 @@ O suporte a RPM aparece como meta na especificação do produto, mas a configura
 
 ## Roadmap
 
-O plano de trabalho segue a especificação funcional do JARVIS AI:
+O plano de trabalho segue a especificação funcional do AURION AI:
 
 1. **Fundação:** chat local, streaming, configuração, histórico SQLite e métricas de hardware implementados; estabilização e empacotamento RPM pendentes.
 2. **Projetos:** cadastro e gestão de workspaces, busca de conteúdo e associação ao histórico.

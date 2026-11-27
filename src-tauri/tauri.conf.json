@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "jarvis-ai",
+  "productName": "Aurion AI",
   "version": "0.1.0",
   "identifier": "br.com.jarvis.ai",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "JARVIS AI",
+        "title": "AURION AI",
         "width": 1440,
         "height": 900,
         "minWidth": 1000,
