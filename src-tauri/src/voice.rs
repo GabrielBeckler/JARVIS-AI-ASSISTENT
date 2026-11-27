@@ -313,10 +313,14 @@ fn speak(
     dir: &Path,
     player: &OsStr,
     text: &str,
+    volume: u8,
     mut stage: impl FnMut(&'static str),
 ) -> Result<(), String> {
     if text.trim().is_empty() || text.len() > 64 * 1024 {
         return Err("O Piper precisa de texto não vazio de até 64 KiB para leitura.".into());
+    }
+    if volume > 100 {
+        return Err("O volume da voz deve estar entre 0% e 100%.".into());
     }
     let model = model_file(dir, "pt_BR-faber-medium.onnx")?;
     let config = model_file(dir, "pt_BR-faber-medium.onnx.json")?;
@@ -344,7 +348,14 @@ fn speak(
         false,
     )?;
     let mut playback = Command::new(player);
-    playback.arg(audio).stdout(Stdio::null());
+    playback
+        .arg(format!("--volume={:.2}", f32::from(volume) / 100.0))
+        .args([
+            "--properties",
+            "application.name=Aurion node.name=aurion-voice",
+        ])
+        .arg(audio)
+        .stdout(Stdio::null());
     job.spawn(&mut playback, "pw-play")?;
     stage("playing");
     job.wait(
@@ -379,12 +390,13 @@ pub async fn voice_speak(
     state: State<'_, VoiceState>,
     id: u32,
     text: String,
+    volume: u8,
     on_stage: Channel<String>,
 ) -> Result<(), String> {
     let dir = voice_dir(&app);
     let job = state.start(id)?;
     let result = tauri::async_runtime::spawn_blocking(move || {
-        speak(&job, &dir?, OsStr::new("pw-play"), &text, |stage| {
+        speak(&job, &dir?, OsStr::new("pw-play"), &text, volume, |stage| {
             let _ = on_stage.send(stage.into());
         })
     })
@@ -435,7 +447,7 @@ mod tests {
         let mut stages = Vec::new();
         let input = capture(&job(), dir.path(), OsStr::new("unused"), |s| stages.push(s));
         assert!(input.unwrap_err().contains("ggml-base.bin"));
-        let output = speak(&job(), dir.path(), OsStr::new("unused"), "Olá", |s| {
+        let output = speak(&job(), dir.path(), OsStr::new("unused"), "Olá", 100, |s| {
             stages.push(s)
         });
         assert!(output.unwrap_err().contains("pt_BR-faber-medium.onnx"));
@@ -496,7 +508,7 @@ mod tests {
         let player = executable(
             dir.path(),
             "play",
-            r#"test "$(cat "$1")" = RIFF; exec sleep 20"#,
+            r#"test "$1" = --volume=0.65; test "$(cat "$4")" = RIFF; exec sleep 20"#,
         );
         let job = job();
         let mut stages = Vec::new();
@@ -505,6 +517,7 @@ mod tests {
             dir.path(),
             player.as_os_str(),
             "Olá de novo.",
+            65,
             |stage| {
                 stages.push(stage);
                 if stage == "playing" {

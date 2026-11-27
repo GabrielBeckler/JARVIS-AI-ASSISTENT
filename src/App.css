@@ -191,6 +191,9 @@ button { color: inherit; }
 .voice-feedback { margin: 4px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .voice-feedback:empty { margin: 0; }
 .voice-error { color: var(--danger); }
+.voice-volume { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.voice-volume input { width: clamp(48px, 6vw, 84px); accent-color: var(--accent); }
+.voice-volume span { min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
 .composer-hint { color: var(--muted); font-size: 12px; }.composer-hint span { padding: 0 3px; color: var(--border-strong); }
 .send-button { display: grid; width: 34px; height: 34px; flex-shrink: 0; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-raised); color: var(--muted); cursor: not-allowed; transition: .16s; }
 .send-button.ready { border-color: var(--accent); background: var(--accent); color: var(--canvas); cursor: pointer; }

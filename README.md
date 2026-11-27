@@ -189,10 +189,14 @@ O Aurion procura o Whisper e o Piper nos caminhos instalados acima e aceita os e
 
 1. Confira os dispositivos padrão no painel de som do Fedora ou com `wpctl status`. Abra o aplicativo com `npm run tauri dev` e confirme que o modelo Ollama aparece como pronto na aba **IA**.
 2. Clique no microfone, fale em português e clique novamente para transcrever. A gravação também termina ao atingir 60 segundos. Revise a transcrição no campo de mensagem e clique em enviar. Se já havia texto no campo, a transcrição é acrescentada.
-3. Aguarde o Ollama terminar a resposta. O Aurion prepara a voz e toca o áudio. Para interromper, use o botão de voz no campo de mensagem. **Ouvir resposta** também permite reproduzir uma resposta escrita ou já salva.
+3. Aguarde a primeira frase da resposta. Em um envio por ditado, o Aurion sintetiza trechos em ordem enquanto o Ollama ainda pode estar gerando. O texto completo aparece normalmente. Use o botão de voz para interromper a leitura sem cancelar o chat. **Ouvir resposta** também permite reproduzir uma resposta escrita ou já salva.
 4. Confira que é possível continuar digitando e enviando mensagens quando as ferramentas de voz estão ausentes.
 
 Os arquivos temporários de áudio e de texto são removidos ao terminar a operação. Só o conteúdo enviado entra no histórico de conversas.
+
+Na leitura, o Aurion usa o texto dos títulos, listas e links, omite emojis e anuncia a presença de blocos de código. O Markdown original continua disponível na conversa, na cópia e na exportação.
+
+O controle **Volume da voz do Aurion** é salvo neste dispositivo e vale a partir da próxima reprodução ou do próximo trecho. Em 100%, o Aurion reproduz o sinal original. Ele não amplifica o sinal nem altera a saída padrão do Fedora. Se o volume estiver baixo em 100%, confira o fluxo **Aurion** e o dispositivo de saída no painel de som enquanto a voz está tocando.
 
 ## Execução e build
 

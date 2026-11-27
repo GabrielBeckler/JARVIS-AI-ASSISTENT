@@ -136,6 +136,7 @@ function App() {
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const draft = getConversationDraft(draftsByConversation, active.id);
   const dictatedDrafts = useRef(new Set<string>());
+  const dictatedQuestions = useRef(new Set<string>());
   const voice = useLocalVoice(active.id, (id, text) => {
     dictatedDrafts.current.add(id);
     setDraftsByConversation((drafts) => {
@@ -148,6 +149,7 @@ function App() {
   const voiceBusy = voiceStage !== "idle" && voiceStage !== "error";
   const voiceNote = voice.state.stage === "error" ? voice.state.error : ({
     idle: "",
+    waiting: "Aguardando o próximo trecho da resposta…",
     starting: "Abrindo microfone…",
     recording: "Gravando · até 60 segundos",
     transcribing: "Transcrevendo em português…",
@@ -519,6 +521,9 @@ function App() {
     if (!deleteDialogId) return;
     const id = deleteDialogId;
     dictatedDrafts.current.delete(id);
+    for (const message of conversations.find((item) => item.id === id)?.messages ?? []) {
+      if (message.id) dictatedQuestions.current.delete(message.id);
+    }
     const next = conversations.find((item) => item.id !== id && !item.archived);
     setConversations((items) => removeConversation(items, id));
     if (activeId === id) {
@@ -593,7 +598,9 @@ function App() {
     if (retryMessageId && !retrying) return;
     const content = retrying?.content ?? draft.trim();
     if (!content) return;
-    const readAnswer = !retrying && dictatedDrafts.current.delete(conversation.id);
+    const readAnswer = retrying
+      ? Boolean(retrying.id && dictatedQuestions.current.has(retrying.id))
+      : dictatedDrafts.current.delete(conversation.id);
     if (activeId !== conversation.id) setActiveId(conversation.id);
 
     const requestContext = createRequestContext(conversation.id, crypto.randomUUID(), model);
@@ -603,6 +610,7 @@ function App() {
     const needsSystemContext = isSystemQuestion(content, history);
     const now = Date.now();
     const startedAt = performance.now();
+    if (readAnswer) voice.startReply(conversationId, requestId);
     scrollPositionsRef.current.set(conversationId, { scrollTop: 0, followBottom: true });
     const userMessage: Message = {
       ...(retrying ?? {}),
@@ -614,6 +622,7 @@ function App() {
       requestId,
       delivery: "pending",
     };
+    if (readAnswer) dictatedQuestions.current.add(userMessage.id!);
     let answer = "";
 
     statusCheckRef.current += 1;
@@ -654,8 +663,9 @@ function App() {
         requestId,
         keepAlive,
         (fragment) => {
-          answer += fragment;
           if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+          answer += fragment;
+          if (readAnswer) voice.appendReply(requestId, fragment);
           setStreamingByConversation((items) => {
             const previous = items[conversationId];
             if (previous && previous.requestId !== requestId) return items;
@@ -690,9 +700,14 @@ function App() {
         }).map((item) => item.id === conversationId ? { ...item, updatedAt: Date.now() } : item);
       });
       firstContentVisibleRef.current.delete(requestId);
-      if (readAnswer) void voice.speak(conversationId, completion.content || answer);
+      if (readAnswer) {
+        dictatedQuestions.current.delete(userMessage.id!);
+        const tail = completion.content?.startsWith(answer) ? completion.content.slice(answer.length) : "";
+        voice.finishReply(requestId, tail);
+      }
     } catch (error) {
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+      if (readAnswer) voice.stopReply(requestId);
       const result = normalizeOllamaError(error);
       statusCheckRef.current += 1;
       if (["connection", "timeout", "configuration"].includes(result.kind)) {
@@ -727,6 +742,7 @@ function App() {
 
   const cancelGeneration = (conversationId: string, requestId: string) => {
     if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+    voice.stopReply(requestId);
     const stream = streamingByConversation[conversationId];
     void cancelOllamaChat(requestId).catch(() => undefined);
     setRequestState(conversationId, null);
@@ -915,7 +931,7 @@ function App() {
                   {message.role === "assistant" ? <div className="assistant-markdown"><MarkdownMessage content={message.content} /></div> : <p>{message.content}</p>}
                   {message.role === "assistant" && <div className="message-actions">
                     <button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(message.requestId ?? message.id ?? `${active.id}-${index}`, message.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>
-                    {message.delivery !== "failed" && message.content.trim() && <button type="button" className="copy-response" disabled={voiceBusy} onClick={() => void voice.speak(active.id, message.content)}><Icon name="speaker" size={15} /> Ouvir resposta</button>}
+                    {message.delivery !== "failed" && message.content.trim() && <button type="button" className="copy-response" disabled={voiceBusy} onClick={() => voice.speak(message.content)}><Icon name="speaker" size={15} /> Ouvir resposta</button>}
                     {copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`] && <span className={`copy-feedback ${copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "failed" : ""}`} role={copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].label}</span>}
                   </div>}
                   {message.delivery === "failed" && <div className="message-failure-label">{message.role === "assistant" ? "Resposta interrompida · não será enviada no próximo contexto" : "Envio falhou · pergunta preservada"}</div>}
@@ -947,6 +963,13 @@ function App() {
                     }}>
                     <Icon name={voiceBusy ? "stop" : "mic"} size={16} />
                   </button>
+                  <label className="voice-volume" title="Volume aplicado ao próximo trecho de voz">
+                    <Icon name="speaker" size={15} />
+                    <input type="range" min={0} max={100} step={1} value={voice.volume}
+                      aria-label="Volume da voz do Aurion" aria-valuetext={`${voice.volume}%`}
+                      onChange={(event) => voice.changeVolume(event.currentTarget.valueAsNumber)} />
+                    <span>{voice.volume}%</span>
+                  </label>
                   <span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span>
                 </div>
                 {activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem" title="Enviar mensagem"><Icon name="send" size={16} /></button>}
