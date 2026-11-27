@@ -8,3 +8,4 @@ export function isModelInstalled(models: readonly OllamaModel[], requestedModel:
 export function toChatContext(messages: readonly StoredMessage[]): OllamaMessage[];
 export function limitChatContext(messages: readonly OllamaMessage[], maxChars?: number): OllamaMessage[];
 export function shouldUseFastMode(prompt: string, hasHistory?: boolean): boolean;
+export function resolveChatThinking(prompt: string, isDictated: boolean): false | undefined;

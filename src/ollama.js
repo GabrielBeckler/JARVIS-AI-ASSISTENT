@@ -61,3 +61,8 @@ export function shouldUseFastMode(prompt, _hasHistory = false) {
   // reasoning for short, direct prompts where that reasoning caused long waits.
   return simplePrompt;
 }
+
+/** @param {string} prompt @param {boolean} isDictated @returns {false | undefined} */
+export function resolveChatThinking(prompt, isDictated) {
+  return isDictated || shouldUseFastMode(prompt) ? false : undefined;
+}

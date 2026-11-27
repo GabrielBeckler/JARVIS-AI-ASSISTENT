@@ -1,6 +1,6 @@
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
-import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext, type StoredMessage } from "./ollama.js";
+import { isModelInstalled, limitChatContext, resolveChatThinking, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
@@ -659,7 +659,7 @@ function App() {
         ollamaBaseUrl,
         requestedModel,
         requestMessages,
-        shouldUseFastMode(content, history.length > 0) ? false : undefined,
+        resolveChatThinking(content, readAnswer),
         requestId,
         keepAlive,
         (fragment) => {

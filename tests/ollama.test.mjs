@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage } from "../src/chat.js";
-import { isModelInstalled, limitChatContext, shouldUseFastMode, toChatContext } from "../src/ollama.js";
+import { isModelInstalled, limitChatContext, resolveChatThinking, shouldUseFastMode, toChatContext } from "../src/ollama.js";
 
 const emptyConversation = (id) => ({ id, title: "Nova conversa", updatedAt: 1, messages: [] });
 
@@ -50,6 +50,13 @@ test("uses fast mode for short direct prompts and system follow-ups with or with
   assert.equal(shouldUseFastMode("Explique por que o céu é azul?"), false);
   assert.equal(shouldUseFastMode("Explique por que o céu é azul?", true), false);
   assert.equal(shouldUseFastMode("Crie um plano detalhado.", true), false);
+});
+
+test("disables thinking for a dictated prompt while preserving the text chat policy", () => {
+  const prompt = "Explique por que o céu é azul.";
+  assert.equal(resolveChatThinking(prompt, true), false);
+  assert.equal(resolveChatThinking(prompt, false), undefined);
+  assert.equal(resolveChatThinking("Responda em uma frase: o que é memória RAM?", false), false);
 });
 
 test("restores legacy history, marks interrupted sends retryable, and leaves old metadata unknown", () => {
