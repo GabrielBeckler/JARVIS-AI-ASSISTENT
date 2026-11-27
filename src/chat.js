@@ -93,5 +93,5 @@ export function removeConversation(conversations, conversationId) {
 export function exportConversationMarkdown(conversation) {
   const title = conversation.title?.trim() || "Conversa sem título";
   const messages = conversation.messages.filter((message) => message.role === "user" || message.role === "assistant");
-  return `# ${title}\n\n${messages.map((message) => `## ${message.role === "user" ? "Você" : "AURION"}\n\n${message.content}`).join("\n\n---\n\n")}\n`;
+  return `# ${title}\n\n${messages.map((message) => `## ${message.role === "user" ? "Você" : "J"}\n\n${message.content}`).join("\n\n---\n\n")}\n`;
 }

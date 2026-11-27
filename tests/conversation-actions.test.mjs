@@ -24,6 +24,6 @@ test("Markdown export keeps title, roles, and original Markdown content", () => 
     { role: "user", content: "### Olá" },
     { role: "assistant", content: "**Resposta**" },
   ] });
-  assert.equal(markdown, "# Ajustes\n\n## Você\n\n### Olá\n\n---\n\n## AURION\n\n**Resposta**\n");
+  assert.equal(markdown, "# Ajustes\n\n## Você\n\n### Olá\n\n---\n\n## J\n\n**Resposta**\n");
   assert.equal(markdown.includes("hidden prompt"), false);
 });

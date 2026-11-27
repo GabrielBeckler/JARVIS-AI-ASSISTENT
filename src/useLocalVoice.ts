@@ -42,6 +42,20 @@ export function useLocalVoice(conversationId: string, onTranscript: (id: string,
     catch { return 100; }
   });
   const volumeRef = useRef(volume);
+  const [voiceName, setVoiceName] = useState(() => {
+    try {
+      const saved = localStorage.getItem("aurion.voice.name");
+      return saved === "cadu" || saved === "edresson" ? saved : "faber";
+    } catch { return "faber"; }
+  });
+  const voiceNameRef = useRef(voiceName);
+
+  function changeVoice(value: string) {
+    if (!["faber", "cadu", "edresson"].includes(value)) return;
+    voiceNameRef.current = value;
+    setVoiceName(value);
+    try { localStorage.setItem("aurion.voice.name", value); } catch { /* Keep the session preference. */ }
+  }
   const selected = useRef(conversationId);
   const current = useRef<Operation | null>(null);
   const reading = useRef<Reading | null>(null);
@@ -104,7 +118,7 @@ export function useLocalVoice(conversationId: string, onTranscript: (id: string,
       while (reading.current === session && session.queue.length > 0) {
         const text = session.queue.shift()!;
         if (mounted.current) setState({ stage: "synthesizing" });
-        await invokeVoice((id, onStage) => invoke<void>("voice_speak", { id, onStage, text, volume: volumeRef.current }));
+        await invokeVoice((id, onStage) => invoke<void>("voice_speak", { id, onStage, text, volume: volumeRef.current, voice: voiceNameRef.current }));
       }
       if (reading.current === session && session.complete) reading.current = null;
     } catch (error) {
@@ -202,6 +216,8 @@ export function useLocalVoice(conversationId: string, onTranscript: (id: string,
     state: state.stage === "error" && state.conversationId !== conversationId ? { stage: "idle" as const } : state,
     volume,
     changeVolume,
+    voiceName,
+    changeVoice,
     startCapture,
     finishCapture,
     startReply,

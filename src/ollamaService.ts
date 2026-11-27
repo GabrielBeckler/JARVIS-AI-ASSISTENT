@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { WebSource } from "./webSearch.js";
 
-export type OllamaErrorKind = "configuration" | "connection" | "timeout" | "model_not_found" | "http" | "invalid_response" | "empty_response" | "channel_closed" | "cancelled";
+export type OllamaErrorKind = "configuration" | "connection" | "timeout" | "model_not_found" | "http" | "invalid_response" | "empty_response" | "channel_closed" | "cancelled" | "web_search";
 export type OllamaError = { kind: OllamaErrorKind; message: string; status: number | null };
 export type OllamaModel = { name: string; model?: string | null };
 export type OllamaMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -13,6 +14,7 @@ export type OllamaChatCompletion = {
   evalDuration: number | null;
   promptEvalCount: number | null;
   evalCount: number | null;
+  sources?: WebSource[];
 };
 
 export type OllamaRequest = { completion: Promise<OllamaChatCompletion> };
@@ -21,7 +23,7 @@ export function normalizeOllamaError(error: unknown): OllamaError {
   if (error && typeof error === "object" && "kind" in error && "message" in error) {
     const value = error as Partial<OllamaError>;
     return {
-      kind: value.kind && ["configuration", "connection", "timeout", "model_not_found", "http", "invalid_response", "empty_response", "channel_closed", "cancelled"].includes(value.kind)
+      kind: value.kind && ["configuration", "connection", "timeout", "model_not_found", "http", "invalid_response", "empty_response", "channel_closed", "cancelled", "web_search"].includes(value.kind)
         ? value.kind : "invalid_response",
       message: typeof value.message === "string" ? value.message : "Falha inesperada na comunicação com o Ollama.",
       status: typeof value.status === "number" ? value.status : null,
@@ -46,9 +48,10 @@ export function streamOllamaChat(
   requestId: string,
   keepAlive: string,
   onContent: (content: string) => void,
+  webQuery?: string,
 ): OllamaRequest {
   const onEvent = new Channel<{ content: string }>((event) => onContent(event.content));
   return {
-    completion: invoke<OllamaChatCompletion>("ollama_chat", { baseUrl, model, messages, think, requestId, keepAlive, onEvent }),
+    completion: invoke<OllamaChatCompletion>("ollama_chat", { baseUrl, model, messages, think, requestId, keepAlive, onEvent, webQuery }),
   };
 }

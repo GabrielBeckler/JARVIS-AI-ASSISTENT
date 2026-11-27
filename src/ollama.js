@@ -1,15 +1,19 @@
+import { withoutWebSources } from "./webSearch.js";
+
 /** @typedef {{ role: "system" | "user" | "assistant", content: string }} OllamaMessage */
 /** @typedef {OllamaMessage & { id?: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed", metrics?: {firstContentMs: number|null, totalElapsedMs: number|null, ollamaTotalMs: number|null, tokensPerSecond: number|null} }} StoredMessage */
 /** @typedef {{ name?: string, model?: string | null }} OllamaModel */
 
-/** @param {Date} [now] @returns {OllamaMessage} */
-export function createLocalChatInstructions(now = new Date()) {
+/** @param {Date} [now] @param {boolean} [hasWebSearch] @returns {OllamaMessage} */
+export function createLocalChatInstructions(now = new Date(), hasWebSearch = false) {
   const date = new Intl.DateTimeFormat("pt-BR", { dateStyle: "long" }).format(now);
   return {
     role: "system",
     content: [
       `Data local do computador: ${date}.`,
-      "Você é o Aurion e funciona localmente, sem acesso à web neste chat.",
+      hasWebSearch
+        ? "Você é J, pronunciado Jota e responde localmente com base nos resultados desta busca web."
+        : "Você é J, pronunciado Jota e funciona localmente, sem acesso à web neste chat.",
       "Para fatos externos que podem ter mudado, como lançamentos e versões recentes de software, informe quando não puder confirmar a situação atual. Não invente datas, disponibilidade ou fontes.",
       "Para perguntas sobre o computador, use os dados locais fornecidos nesta solicitação.",
     ].join("\n"),
@@ -29,7 +33,7 @@ export function isModelInstalled(models, requestedModel) {
 export function toChatContext(messages) {
   return messages
     .filter((message) => message.delivery !== "failed" && message.delivery !== "pending")
-    .map(({ role, content }) => ({ role, content }));
+    .map(({ role, content }) => ({ role, content: role === "assistant" ? withoutWebSources(content) : content }));
 }
 
 /**

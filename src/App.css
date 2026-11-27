@@ -341,3 +341,6 @@ button { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.voice-choice { display: inline-flex; align-items: center; gap: 5px; color: var(--text); font-size: 12px; }
+.voice-choice select { color: var(--text); background: var(--panel-raised); border: 1px solid var(--border-strong); border-radius: 6px; padding: 5px; }

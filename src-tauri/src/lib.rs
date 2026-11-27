@@ -2,6 +2,7 @@ mod chat_store;
 mod ollama;
 mod system_metrics;
 mod voice;
+mod web_search;
 
 use serde::Serialize;
 use std::{
@@ -43,16 +44,24 @@ struct ChatStreamEvent {
     content: String,
 }
 
+#[derive(Serialize)]
+struct ChatResponse {
+    #[serde(flatten)]
+    completion: ollama::ChatCompletion,
+    sources: Vec<web_search::WebSource>,
+}
+
 #[tauri::command]
 async fn ollama_chat(
     request_id: String,
     base_url: String,
     model: String,
-    messages: Vec<ollama::ChatMessage>,
+    mut messages: Vec<ollama::ChatMessage>,
     think: Option<bool>,
     keep_alive: Option<String>,
+    web_query: Option<String>,
     on_event: Channel<ChatStreamEvent>,
-) -> Result<ollama::ChatCompletion, ollama::OllamaError> {
+) -> Result<ChatResponse, ollama::OllamaError> {
     let cancellation = CancellationToken::new();
     {
         let mut registry = chat_cancellations()
@@ -65,19 +74,34 @@ async fn ollama_chat(
             .active
             .insert(request_id.clone(), cancellation.clone());
     }
-    let result = ollama::chat(
-        &base_url,
-        &model,
-        &messages,
-        think,
-        keep_alive.as_deref(),
-        cancellation,
-        |content| {
-            on_event
-                .send(ChatStreamEvent { content })
-                .map_err(|_| ollama::OllamaError::channel_closed())
-        },
-    )
+    let result = async {
+        let sources = if let Some(query) = web_query {
+            let results = web_search::search(&query, &cancellation)
+                .await
+                .map_err(ollama::OllamaError::web_search)?;
+            web_search::add_search_context(&mut messages, results)
+        } else {
+            Vec::new()
+        };
+        let completion = ollama::chat(
+            &base_url,
+            &model,
+            &messages,
+            think,
+            keep_alive.as_deref(),
+            cancellation,
+            |content| {
+                on_event
+                    .send(ChatStreamEvent { content })
+                    .map_err(|_| ollama::OllamaError::channel_closed())
+            },
+        )
+        .await?;
+        Ok(ChatResponse {
+            completion,
+            sources,
+        })
+    }
     .await;
     chat_cancellations()
         .lock()

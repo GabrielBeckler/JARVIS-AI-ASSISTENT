@@ -340,6 +340,7 @@ fn speak(
     player: &OsStr,
     text: &str,
     volume: u8,
+    voice: &str,
     mut stage: impl FnMut(&'static str),
 ) -> Result<(), String> {
     if text.trim().is_empty() || text.len() > 64 * 1024 {
@@ -348,8 +349,14 @@ fn speak(
     if volume > 100 {
         return Err("O volume da voz deve estar entre 0% e 100%.".into());
     }
-    let model = model_file(dir, "pt_BR-faber-medium.onnx")?;
-    let config = model_file(dir, "pt_BR-faber-medium.onnx.json")?;
+    let filename = match voice {
+        "faber" => "pt_BR-faber-medium.onnx",
+        "cadu" => "pt_BR-cadu-medium.onnx",
+        "edresson" => "pt_BR-edresson-low.onnx",
+        _ => return Err("Voz não reconhecida.".into()),
+    };
+    let model = model_file(dir, filename)?;
+    let config = model_file(dir, &format!("{filename}.json"))?;
     let temp =
         tempfile::tempdir().map_err(|_| "Não foi possível preparar a leitura em voz alta.")?;
     let input = temp.path().join("speech.txt");
@@ -417,12 +424,13 @@ pub async fn voice_speak(
     id: u32,
     text: String,
     volume: u8,
+    voice: Option<String>,
     on_stage: Channel<String>,
 ) -> Result<(), String> {
     let dir = voice_dir(&app);
     let job = state.start(id)?;
     let result = tauri::async_runtime::spawn_blocking(move || {
-        speak(&job, &dir?, OsStr::new("pw-play"), &text, volume, |stage| {
+        speak(&job, &dir?, OsStr::new("pw-play"), &text, volume, voice.as_deref().unwrap_or("faber"), |stage| {
             let _ = on_stage.send(stage.into());
         })
     })
@@ -473,7 +481,7 @@ mod tests {
         let mut stages = Vec::new();
         let input = capture(&job(), dir.path(), OsStr::new("unused"), |s| stages.push(s));
         assert!(input.unwrap_err().contains("ggml-base.bin"));
-        let output = speak(&job(), dir.path(), OsStr::new("unused"), "Olá", 100, |s| {
+        let output = speak(&job(), dir.path(), OsStr::new("unused"), "Olá", 100, "faber", |s| {
             stages.push(s)
         });
         assert!(output.unwrap_err().contains("pt_BR-faber-medium.onnx"));
@@ -546,6 +554,7 @@ mod tests {
             player.as_os_str(),
             "Olá de novo.",
             65,
+            "faber",
             |stage| {
                 stages.push(stage);
                 if stage == "playing" {

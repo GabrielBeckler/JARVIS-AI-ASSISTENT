@@ -151,6 +151,78 @@ curl http://127.0.0.1:11434/api/tags
 
 O React chama comandos assíncronos Tauri; o backend Rust faz as requisições para o endereço configurado, que deve ser HTTP em loopback (`localhost` ou `127.0.0.1`). Assim, o WebView não acessa a API do Ollama diretamente e não precisa de configuração CORS. O backend rejeita endereços remotos. Mantenha o Ollama vinculado a loopback; não exponha a API em `0.0.0.0`.
 
+## Pesquisa na web
+
+O Aurion busca fontes automaticamente para perguntas sobre fatos externos, lançamentos, notícias e versões públicas. Pergunte **“Como está o lançamento do GTA VI?”** para testar. Perguntas sobre o próprio computador, traduções e textos a editar seguem pelo fluxo local. **“Pesquise sobre…”** também aciona a busca. Quando a resposta anterior teve fontes, uma continuação curta como **“E no PC?”** pode reaproveitar o assunto da pesquisa.
+
+O serviço online recebe a consulta e devolve até três fontes. O Aurion gera a resposta na máquina e mostra os links abaixo dela. A interface indica antes do envio quando a consulta vai para o Ollama. A pesquisa precisa de conexão e de um serviço configurado. Quando a busca falha, o Aurion informa o erro e permite tentar novamente.
+
+### SearXNG local sem chave do Ollama
+
+O Aurion usa o SearXNG quando `AURION_SEARXNG_URL` aponta para uma instância no seu computador. O SearXNG recebe a consulta e a encaminha aos buscadores habilitados. A geração da resposta segue no Ollama local.
+
+No Fedora, instale o Podman se precisar, com `sudo dnf install podman`. Configure a instância e inicie o contêiner:
+
+```bash
+searx_dir="${XDG_CONFIG_HOME:-$HOME/.config}/aurion/searxng"
+mkdir -p "$searx_dir"
+if [ ! -f "$searx_dir/settings.yml" ]; then
+  searx_secret="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  cat > "$searx_dir/settings.yml" <<EOF_SETTINGS
+use_default_settings: true
+server:
+  secret_key: "$searx_secret"
+  limiter: false
+search:
+  formats:
+    - html
+    - json
+EOF_SETTINGS
+fi
+
+podman run -d --name aurion-searxng -p 127.0.0.1:8888:8080 \
+  -v "$searx_dir:/etc/searxng:Z" docker.io/searxng/searxng:latest
+```
+
+Depois que o serviço iniciar, teste a busca e abra o Aurion:
+
+```bash
+curl -fsS -G 'http://127.0.0.1:8888/search' \
+  --data-urlencode 'q=Fedora Linux' --data 'format=json'
+
+AURION_SEARXNG_URL=http://127.0.0.1:8888 npm run tauri dev
+```
+
+Se o contêiner já existir e estiver parado, use `podman start aurion-searxng`. Se o JSON vier com poucos ou nenhum resultado, teste outra consulta e confira os motores da instância pelo endereço local.
+
+### Serviço de busca do Ollama
+
+Crie uma chave em [Ollama](https://ollama.com/settings/keys) e execute o comando abaixo na pasta do projeto. Cole a chave quando o terminal pedir e pressione Enter. A digitação fica oculta. O aplicativo lê a chave pelo ambiente do backend.
+
+```bash
+(
+  read -rsp 'Chave do Ollama: ' OLLAMA_API_KEY &&
+  printf '\n' &&
+  export OLLAMA_API_KEY &&
+  npm run tauri dev
+)
+```
+
+Para conferir a chave sem imprimi-la, execute:
+
+```bash
+(
+  read -rsp 'Chave do Ollama: ' OLLAMA_API_KEY || exit
+  printf '\n'
+  printf 'Authorization: Bearer %s\n' "$OLLAMA_API_KEY" |
+    curl -sS --max-time 15 -o /dev/null -w 'HTTP %{http_code}\n' \
+      --header @- --json '{"query":"Fedora Linux","max_results":1}' \
+      https://ollama.com/api/web_search
+)
+```
+
+Um HTTP 200 confirma o acesso. Para HTTP 401, confira a chave criada em ollama.com e inicie o Aurion com ela. Para HTTP 403, verifique o acesso à busca no painel da sua conta Ollama. Se o serviço retornar HTTP 402, verifique faturamento ou use o SearXNG local.
+
 ## Conversa por voz no Fedora
 
 Instale as ferramentas abaixo na sessão de usuário que roda o Aurion. A voz usa a entrada e a saída padrão configuradas no Fedora. Depois da instalação e dos downloads, gravação, transcrição e síntese funcionam localmente.

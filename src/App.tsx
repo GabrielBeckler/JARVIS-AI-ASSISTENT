@@ -6,6 +6,7 @@ import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
 import { ThemedSelect } from "./ThemedSelect";
 import { useLocalVoice } from "./useLocalVoice";
+import { appendWebSources, searchQueryFor, webSourcesMarkdown, withoutWebSources } from "./webSearch.js";
 import { MarkdownMessage } from "./MarkdownMessage.js";
 import { SystemDashboard } from "./SystemDashboard";
 import { exportMarkdownFile, initializeChatStore, persistChatStore } from "./chatStore";
@@ -27,7 +28,7 @@ type Panel = "system" | "ai" | "project";
 type ServiceStatus = "checking" | "available" | "unavailable";
 type ModelStatus = "checking" | "missing" | "ready" | "unknown";
 type ChatStoreStatus = "checking" | "ready" | "failed";
-type StreamState = { requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
+type StreamState = { webSearch: boolean; requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
 type CopyFeedback = { label: string; failed: boolean };
 type RenameDialogState = { conversationId: string; value: string };
 
@@ -137,6 +138,9 @@ function App() {
   const draft = getConversationDraft(draftsByConversation, active.id);
   const dictatedDrafts = useRef(new Set<string>());
   const dictatedQuestions = useRef(new Set<string>());
+  const draftSendsWebQuery = Boolean(searchQueryFor(draft, {
+    systemQuestion: isSystemQuestion(draft, toChatContext(active.messages)), history: active.messages,
+  }));
   const voice = useLocalVoice(active.id, (id, text) => {
     dictatedDrafts.current.add(id);
     setDraftsByConversation((drafts) => {
@@ -607,7 +611,12 @@ function App() {
     const { conversationId, requestId, model: requestedModel } = requestContext;
     const history = toChatContext(conversation.messages.filter((message) => message.id !== retrying?.id));
     const currentQuestion: StoredMessage = { role: "user", content };
-    const needsSystemContext = isSystemQuestion(content, history);
+    const systemQuestion = isSystemQuestion(content, history);
+    const searchHistory = retrying
+      ? conversation.messages.slice(0, conversation.messages.indexOf(retrying))
+      : conversation.messages;
+    const webQuery = searchQueryFor(content, { systemQuestion, history: searchHistory });
+    const needsSystemContext = !webQuery && systemQuestion;
     const now = Date.now();
     const startedAt = performance.now();
     if (readAnswer) voice.startReply(conversationId, requestId);
@@ -627,7 +636,7 @@ function App() {
 
     statusCheckRef.current += 1;
     setRequestState(conversationId, requestId);
-    setStreamingByConversation((items) => ({ ...items, [conversationId]: { requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
+    setStreamingByConversation((items) => ({ ...items, [conversationId]: { webSearch: Boolean(webQuery), requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
     setErrorsByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
     if (!retrying) setDraftsByConversation((drafts) => setConversationDraft(drafts, conversationId, ""));
     setConversations((items) => (items.length ? items : [conversation]).map((item) => {
@@ -654,14 +663,14 @@ function App() {
         }
       }
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
-      const instructions = createLocalChatInstructions();
+      const instructions = createLocalChatInstructions(undefined, Boolean(webQuery));
       if (systemContext) instructions.content += `\n\n${systemContext}`;
-      const requestMessages = limitChatContext([instructions, ...history, currentQuestion]);
+      const requestMessages = limitChatContext([instructions, ...history, currentQuestion], webQuery ? 7_500 : undefined);
       const request = streamOllamaChat(
         ollamaBaseUrl,
         requestedModel,
         requestMessages,
-        resolveChatThinking(content, readAnswer),
+        webQuery ? false : resolveChatThinking(content, readAnswer),
         requestId,
         keepAlive,
         (fragment) => {
@@ -671,9 +680,10 @@ function App() {
           setStreamingByConversation((items) => {
             const previous = items[conversationId];
             if (previous && previous.requestId !== requestId) return items;
-            return { ...items, [conversationId]: { requestId, content: `${previous?.content ?? ""}${fragment}`, model: requestedModel, createdAt: now, startedAt, firstContentMs: previous?.firstContentMs ?? null } };
+            return { ...items, [conversationId]: { webSearch: Boolean(webQuery), requestId, content: `${previous?.content ?? ""}${fragment}`, model: requestedModel, createdAt: now, startedAt, firstContentMs: previous?.firstContentMs ?? null } };
           });
         },
+        webQuery,
       );
       const completion = await request.completion;
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
@@ -693,7 +703,7 @@ function App() {
         return appendAssistantOnce(sent, conversationId, requestId, {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: completion.content || answer,
+          content: appendWebSources(completion.content || answer, completion.sources),
           model: completion.model || requestedModel,
           createdAt: Date.now(),
           requestId,
@@ -711,13 +721,15 @@ function App() {
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
       if (readAnswer) voice.stopReply(requestId);
       const result = normalizeOllamaError(error);
-      statusCheckRef.current += 1;
-      if (["connection", "timeout", "configuration"].includes(result.kind)) {
-        setServiceStatus("unavailable");
-        setModelStatus("unknown");
-      } else {
-        setServiceStatus("available");
-        if (result.kind === "model_not_found" && modelRef.current === requestedModel) setModelStatus("missing");
+      if (result.kind !== "web_search") {
+        statusCheckRef.current += 1;
+        if (["connection", "timeout", "configuration"].includes(result.kind)) {
+          setServiceStatus("unavailable");
+          setModelStatus("unknown");
+        } else {
+          setServiceStatus("available");
+          if (result.kind === "model_not_found" && modelRef.current === requestedModel) setModelStatus("missing");
+        }
       }
       const partial = answer;
       const firstVisibleMs = firstContentVisibleRef.current.get(requestId) ?? null;
@@ -817,7 +829,7 @@ function App() {
       <aside id="left-rail" className="left-rail" aria-label="Navegação e conversas" tabIndex={0}>
         <div className="brand-lockup">
           <div className="brand-mark"><Icon name="spark" size={19} /></div>
-          <div><strong>AURION</strong><span>Assistente local</span></div>
+          <div><strong>J</strong><span>Assistente local</span></div>
         </div>
         <button className="new-chat" onClick={newConversation} disabled={chatStoreStatus === "checking"}><Icon name="plus" size={17} /><span>{chatStoreStatus === "checking" ? "Restaurando histórico…" : "Nova conversa"}</span><kbd>Ctrl K</kbd></button>
         <label className="search-box"><Icon name="search" size={16} /><input ref={searchInput} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar conversas" aria-label="Buscar conversas" /><kbd>Ctrl F</kbd></label>
@@ -929,11 +941,14 @@ function App() {
               {active.messages.map((message, index) => <article className={`message-row ${message.role} ${message.delivery === "failed" ? "failed" : ""}`} key={`${active.id}-${index}`}>
                 <div className={`message-avatar ${message.role}`}>{message.role === "user" ? "G" : <Icon name="spark" size={15} />}</div>
                 <div className="message-content">
-                  <div className="message-author"><span className="message-author-name">{message.role === "user" ? "Você" : "Aurion"}</span><span>{message.model ?? "Modelo desconhecido"} · {messageTime(message.createdAt)}</span></div>
-                  {message.role === "assistant" ? <div className="assistant-markdown"><MarkdownMessage content={message.content} /></div> : <p>{message.content}</p>}
+                  <div className="message-author"><span className="message-author-name">{message.role === "user" ? "Você" : "J"}</span><span>{message.model ?? "Modelo desconhecido"} · {messageTime(message.createdAt)}</span></div>
+                  {message.role === "assistant" ? <div className="assistant-markdown">
+                    <MarkdownMessage content={withoutWebSources(message.content)} />
+                    <MarkdownMessage content={webSourcesMarkdown(message.content)} />
+                  </div> : <p>{message.content}</p>}
                   {message.role === "assistant" && <div className="message-actions">
                     <button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(message.requestId ?? message.id ?? `${active.id}-${index}`, message.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>
-                    {message.delivery !== "failed" && message.content.trim() && <button type="button" className="copy-response" disabled={voiceBusy} onClick={() => voice.speak(message.content)}><Icon name="speaker" size={15} /> Ouvir resposta</button>}
+                    {message.delivery !== "failed" && message.content.trim() && <button type="button" className="copy-response" disabled={voiceBusy} onClick={() => voice.speak(withoutWebSources(message.content))}><Icon name="speaker" size={15} /> Ouvir resposta</button>}
                     {copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`] && <span className={`copy-feedback ${copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "failed" : ""}`} role={copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].label}</span>}
                   </div>}
                   {message.delivery === "failed" && <div className="message-failure-label">{message.role === "assistant" ? "Resposta interrompida · não será enviada no próximo contexto" : "Envio falhou · pergunta preservada"}</div>}
@@ -941,7 +956,7 @@ function App() {
                   {message.role === "user" && message.delivery === "failed" && <button className="retry-message" onClick={() => void sendMessage(undefined, message.id)} disabled={Boolean(activeRequestId)}>Tentar novamente</button>}
                 </div>
               </article>)}
-              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">Aurion</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : <div className="typing-indicator"><i /><i /><i /></div>}{activeStream.content && <div className="message-actions"><button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(activeStream.requestId, activeStream.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>{copyFeedbackByKey[activeStream.requestId] && <span className={`copy-feedback ${copyFeedbackByKey[activeStream.requestId].failed ? "failed" : ""}`} role={copyFeedbackByKey[activeStream.requestId].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[activeStream.requestId].label}</span>}</div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
+              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">J</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : activeStream.webSearch ? <p role="status">Buscando fontes e preparando a resposta…</p> : <div className="typing-indicator"><i /><i /><i /></div>}{activeStream.content && <div className="message-actions"><button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(activeStream.requestId, activeStream.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>{copyFeedbackByKey[activeStream.requestId] && <span className={`copy-feedback ${copyFeedbackByKey[activeStream.requestId].failed ? "failed" : ""}`} role={copyFeedbackByKey[activeStream.requestId].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[activeStream.requestId].label}</span>}</div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
               <div className="message-end" />
             </div>
           )}
@@ -951,7 +966,7 @@ function App() {
           {showJumpToLatest && active.messages.length > 0 && <button type="button" className="jump-to-latest" onClick={jumpToLatest} aria-label="Voltar ao final da conversa" title="Voltar ao final da conversa"><Icon name="chevron" size={14} /><span>Mensagens recentes</span></button>}
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
-              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => updateActiveDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Aurion..." aria-label="Mensagem" aria-describedby="composer-hint" />
+              <textarea ref={textarea} rows={1} value={draft} onChange={(event) => updateActiveDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao J..." aria-label="Mensagem" aria-describedby="composer-hint" />
               <div className="composer-bottom">
                 <div className="composer-tools">
                   <button type="button" className="voice-button" data-stage={voiceStage}
@@ -965,10 +980,17 @@ function App() {
                     }}>
                     <Icon name={voiceBusy ? "stop" : "mic"} size={16} />
                   </button>
+                  <label className="voice-choice">Voz
+                    <select aria-label="Escolher voz" value={voice.voiceName} onChange={(event) => voice.changeVoice(event.target.value)}>
+                      <option value="faber">Faber</option>
+                      <option value="cadu">Cadu</option>
+                      <option value="edresson">Edresson</option>
+                    </select>
+                  </label>
                   <label className="voice-volume" title="Volume aplicado ao próximo trecho de voz">
                     <Icon name="speaker" size={15} />
                     <input type="range" min={0} max={100} step={1} value={voice.volume}
-                      aria-label="Volume da voz do Aurion" aria-valuetext={`${voice.volume}%`}
+                      aria-label="Volume da voz do J" aria-valuetext={`${voice.volume}%`}
                       onChange={(event) => voice.changeVolume(event.currentTarget.valueAsNumber)} />
                     <span>{voice.volume}%</span>
                   </label>
@@ -979,7 +1001,7 @@ function App() {
               {voice.state.stage === "error" ? <p className="voice-feedback voice-error" role="alert">{voiceNote}</p> :
                 <div className="voice-feedback" role="status">{voiceNote || (draft.trim() && dictatedDrafts.current.has(active.id) ? "Revise a transcrição e envie para ouvir a resposta." : "")}</div>}
             </form>
-            <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
+            <p className="privacy-note"><span className="lock-icon">⌑</span> {draftSendsWebQuery ? "A consulta será enviada a um buscador. A resposta é gerada no computador." : "As conversas são processadas localmente no seu computador."}</p>
           </div>
           </div>
         </section>

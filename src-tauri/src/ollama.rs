@@ -20,6 +20,7 @@ pub enum OllamaErrorKind {
     EmptyResponse,
     Cancelled,
     ChannelClosed,
+    WebSearch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,6 +50,10 @@ impl OllamaError {
             message: message.into(),
             status: Some(status),
         }
+    }
+
+    pub fn web_search(message: String) -> Self {
+        Self::new(OllamaErrorKind::WebSearch, message)
     }
 
     pub fn channel_closed() -> Self {
