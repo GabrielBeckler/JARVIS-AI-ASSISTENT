@@ -4,6 +4,7 @@ export type StoredMessage = OllamaMessage & { id?: string; model?: string; creat
 
 type OllamaModel = { name?: string; model?: string | null };
 
+export function createLocalChatInstructions(now?: Date): OllamaMessage;
 export function isModelInstalled(models: readonly OllamaModel[], requestedModel: string): boolean;
 export function toChatContext(messages: readonly StoredMessage[]): OllamaMessage[];
 export function limitChatContext(messages: readonly OllamaMessage[], maxChars?: number): OllamaMessage[];

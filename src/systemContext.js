@@ -2,10 +2,19 @@ const systemTerms = /\b(?:meu computador|meu pc|este computador|este pc|sistema|
 const hardwareDefinition = /\bo\s+que\s+(?:[eé]|significa|s[aã]o)\s+(?:(?:o|a|os|as|um|uma)\s+)?(?:mem[oó]ria(?:\s+ram)?|ram|vram|cpu|gpu|processador|placa de v[ií]deo|hardware)\b/i;
 const systemFollowUp = /^\s*(?:e|and)\s+(?:(?:a|o|os|as)\s+)?(?:temperatura|uso|desempenho|performance|cpu|processador|gpu|placa de v[ií]deo|ram|mem[oó]ria|vram|modelo)\b/i;
 
+function isLocalPlatformQuestion(prompt) {
+  const query = prompt.normalize("NFD").replace(/\p{M}/gu, "");
+  const asksPlatform = /\b(?:sistema operacional|distro|distribuicao linux)\b/i.test(query)
+    || (/\b(?:versao|edicao)\b/i.test(query) && /\b(?:fedora|linux|ubuntu|debian|windows|macos)\b/i.test(query));
+  const describesLocalSystem = /\b(?:voce|rodando|instalad[ao]|meu|minha|neste|nesta|aqui)\b/i.test(query);
+  const asksPublicRelease = /\b(?:ultima|mais recente|lancamento)\b/i.test(query);
+  return asksPlatform && describesLocalSystem && !asksPublicRelease;
+}
+
 /** @param {string} prompt @param {readonly {role: string, content: string}[]} [history] */
 export function isSystemQuestion(prompt, history = []) {
   if (hardwareDefinition.test(prompt)) return false;
-  if (systemTerms.test(prompt)) return true;
+  if (isLocalPlatformQuestion(prompt) || systemTerms.test(prompt)) return true;
   if (!/\btemperatura\b/i.test(prompt)) return false;
   const priorSystemQuestion = history.slice(-8).some((message) =>
     (message.role === "user" || message.role === "assistant") && systemTerms.test(message.content));
@@ -33,6 +42,14 @@ function staticName(value, reason) {
  * @param {{collectionFailed?: boolean, now?: number, staleAfterMs?: number}} [options]
  */
 export function createSystemContextPrompt(prompt, snapshot, options = {}) {
+  if (isLocalPlatformQuestion(prompt)) {
+    const platform = options.collectionFailed ? null : snapshot?.platformName?.trim();
+    return platform
+      ? `Sistema operacional instalado, lido de /etc/os-release: ${platform}.
+Para a pergunta atual, responda com esse nome exato.`
+      : "A versão do sistema operacional instalado está indisponível. Informe que não foi possível identificar a versão local, sem supor um nome.";
+  }
+
   const query = prompt.toLocaleLowerCase();
   const asksTemperature = /temperatura/.test(query);
   const asksGpu = /gpu|placa de v[ií]deo/.test(query);

@@ -207,6 +207,30 @@ Na leitura, o Aurion usa o texto dos títulos, listas e links, omite emojis e an
 
 O controle **Volume da voz do Aurion** é salvo neste dispositivo e vale a partir da próxima reprodução ou do próximo trecho. Em 100%, o Aurion reproduz o sinal original. Ele não amplifica o sinal nem altera a saída padrão do Fedora. Se o volume estiver baixo em 100%, confira o fluxo **Aurion** e o dispositivo de saída no painel de som enquanto a voz está tocando.
 
+### Testar a entrada de áudio
+
+Se a transcrição chegar com palavras trocadas ou faltando, grave a mesma frase fora do Aurion e ouça a entrada padrão do Fedora. O teste grava oito segundos. Conte um segundo antes de falar e deixe uma pausa depois da última palavra.
+
+```bash
+audio_test_dir="$(mktemp -d)"
+pw-record --rate=16000 --channels=1 --format=s16 --sample-count=128000 "$audio_test_dir/ditado.wav" &&
+pw-play "$audio_test_dir/ditado.wav"
+```
+
+Se a gravação já sair cortada, abafada ou distorcida, confira a fonte padrão e o nível de entrada em Configurações do Sistema → Áudio. Se a gravação estiver clara, compare a transcrição da mesma amostra usando os modelos instalados:
+
+```bash
+voice_dir="${AURION_VOICE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/br.com.jarvis.ai/voice}"
+for modelo in ggml-base.bin ggml-small.bin; do
+  [ -s "$voice_dir/$modelo" ] || continue
+  printf '\n%s\n' "$modelo"
+  "$voice_dir/whisper/bin/whisper-cli" --no-gpu -l pt -nt \
+    -m "$voice_dir/$modelo" -f "$audio_test_dir/ditado.wav"
+done
+```
+
+O teste usa a amostra local. Os modelos comparam a mesma entrada, independente do Ollama.
+
 ## Execução e build
 
 | Comando | Finalidade |

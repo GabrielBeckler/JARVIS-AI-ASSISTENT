@@ -37,6 +37,16 @@ test("keeps hardware definitions out of the system snapshot flow, including impe
   assert.equal(isSystemQuestion("Quanto de memória RAM tem no meu computador?", history), true);
 });
 
+test("grounds installed Fedora questions without treating public Fedora releases as local", () => {
+  const question = "Qual a versão do Fedora você está mesmo?";
+  assert.equal(isSystemQuestion(question), true);
+  assert.equal(isSystemQuestion("Qual a última versão do Fedora?"), false);
+  assert.equal(isSystemQuestion("Qual a versão do Aurion instalada?"), false);
+  assert.equal(createSystemContextPrompt(question, { platformName: "Fedora Linux 44 (KDE Plasma Desktop Edition)" }),
+    "Sistema operacional instalado, lido de /etc/os-release: Fedora Linux 44 (KDE Plasma Desktop Edition).\nPara a pergunta atual, responda com esse nome exato.");
+  assert.match(createSystemContextPrompt(question, null), /indisponível/);
+});
+
 test("includes current relevant hardware fields, units, sample time, and N/D without inventing values", () => {
   const prompt = createSystemContextPrompt("Como está o desempenho do meu computador?", snapshot, { now: 1_100 });
   assert.match(prompt, /Coletado em 1970-01-01T00:00:01\.000Z/);

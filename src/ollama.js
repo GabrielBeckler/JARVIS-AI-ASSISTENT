@@ -2,6 +2,20 @@
 /** @typedef {OllamaMessage & { id?: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed", metrics?: {firstContentMs: number|null, totalElapsedMs: number|null, ollamaTotalMs: number|null, tokensPerSecond: number|null} }} StoredMessage */
 /** @typedef {{ name?: string, model?: string | null }} OllamaModel */
 
+/** @param {Date} [now] @returns {OllamaMessage} */
+export function createLocalChatInstructions(now = new Date()) {
+  const date = new Intl.DateTimeFormat("pt-BR", { dateStyle: "long" }).format(now);
+  return {
+    role: "system",
+    content: [
+      `Data local do computador: ${date}.`,
+      "Você é o Aurion e funciona localmente, sem acesso à web neste chat.",
+      "Para fatos externos que podem ter mudado, como lançamentos e versões recentes de software, informe quando não puder confirmar a situação atual. Não invente datas, disponibilidade ou fontes.",
+      "Para perguntas sobre o computador, use os dados locais fornecidos nesta solicitação.",
+    ].join("\n"),
+  };
+}
+
 /** @param {readonly OllamaModel[]} models @param {string} requestedModel */
 export function isModelInstalled(models, requestedModel) {
   const requested = requestedModel.trim().toLocaleLowerCase();

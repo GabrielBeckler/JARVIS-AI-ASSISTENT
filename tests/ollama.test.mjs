@@ -1,9 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, getConversationDraft, isCurrentRequest, restoreConversations, restoreScrollTop, setConversationDraft, updateMessage } from "../src/chat.js";
-import { isModelInstalled, limitChatContext, resolveChatThinking, shouldUseFastMode, toChatContext } from "../src/ollama.js";
+import { createLocalChatInstructions, isModelInstalled, limitChatContext, resolveChatThinking, shouldUseFastMode, toChatContext } from "../src/ollama.js";
 
 const emptyConversation = (id) => ({ id, title: "Nova conversa", updatedAt: 1, messages: [] });
+
+test("shares the local date and the limits of external knowledge with the model", () => {
+  const instructions = createLocalChatInstructions(new Date(2026, 10, 27, 12));
+  assert.equal(instructions.role, "system");
+  assert.match(instructions.content, /27 de novembro de 2026/);
+  assert.match(instructions.content, /sem acesso à web/);
+  assert.match(instructions.content, /não puder confirmar/);
+});
 
 test("recognizes Ollama model tags and reports a missing selection", () => {
   assert.equal(isModelInstalled([{ name: "qwen3.5:4b" }], "qwen3.5:4b"), true);

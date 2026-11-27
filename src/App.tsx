@@ -1,6 +1,6 @@
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
-import { isModelInstalled, limitChatContext, resolveChatThinking, toChatContext, type StoredMessage } from "./ollama.js";
+import { createLocalChatInstructions, isModelInstalled, limitChatContext, resolveChatThinking, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
 import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
@@ -644,17 +644,19 @@ function App() {
     }));
 
     try {
-      let systemContext: StoredMessage[] = [];
+      let systemContext = "";
       if (needsSystemContext) {
         try {
           const snapshot = await getSystemSnapshot();
-          systemContext = [{ role: "system", content: createSystemContextPrompt(content, snapshot) }];
+          systemContext = createSystemContextPrompt(content, snapshot);
         } catch {
-          systemContext = [{ role: "system", content: createSystemContextPrompt(content, null, { collectionFailed: true }) }];
+          systemContext = createSystemContextPrompt(content, null, { collectionFailed: true });
         }
       }
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
-      const requestMessages = limitChatContext([...systemContext, ...history, currentQuestion]);
+      const instructions = createLocalChatInstructions();
+      if (systemContext) instructions.content += `\n\n${systemContext}`;
+      const requestMessages = limitChatContext([instructions, ...history, currentQuestion]);
       const request = streamOllamaChat(
         ollamaBaseUrl,
         requestedModel,
