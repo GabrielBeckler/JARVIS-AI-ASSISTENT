@@ -5,6 +5,7 @@ import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaC
 import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
 import { ThemedSelect } from "./ThemedSelect";
+import { useLocalVoice } from "./useLocalVoice";
 import { MarkdownMessage } from "./MarkdownMessage.js";
 import { SystemDashboard } from "./SystemDashboard";
 import { exportMarkdownFile, initializeChatStore, persistChatStore } from "./chatStore";
@@ -52,6 +53,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     folder: <><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H10l2 2h7.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.6.9l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.6-.9l-1.7.7-1.4-2.4L7.5 15a8 8 0 0 1 0-1.9l-1.4-1.2 1.4-2.4 1.7.7a8 8 0 0 1 1.6-.9l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.6.9l1.7-.7 1.4 2.4-1.4 1.2a8 8 0 0 1-.1 1.9Z" /></>,
     mic: <><rect x="9" y="3" width="6" height="12" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8" /></>,
+    speaker: <><path d="M11 5 6 9H3v6h3l5 4zM15 9a4 4 0 0 1 0 6m3-9a8 8 0 0 1 0 12" /></>,
     send: <><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></>,
     cpu: <><rect x="5" y="5" width="14" height="14" rx="2" /><path d="M9 9h6v6H9zM9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4" /></>,
     memory: <><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M7 10v4m4-4v4m4-4v4m4-4v4" /></>,
@@ -133,6 +135,26 @@ function App() {
   const suppressSelectionAfterDragRef = useRef(false);
   const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0] ?? starter;
   const draft = getConversationDraft(draftsByConversation, active.id);
+  const dictatedDrafts = useRef(new Set<string>());
+  const voice = useLocalVoice(active.id, (id, text) => {
+    dictatedDrafts.current.add(id);
+    setDraftsByConversation((drafts) => {
+      const previous = getConversationDraft(drafts, id).trimEnd();
+      return setConversationDraft(drafts, id, previous ? `${previous}\n${text}` : text);
+    });
+    textarea.current?.focus({ preventScroll: true });
+  });
+  const voiceStage = voice.state.stage;
+  const voiceBusy = voiceStage !== "idle" && voiceStage !== "error";
+  const voiceNote = voice.state.stage === "error" ? voice.state.error : ({
+    idle: "",
+    starting: "Abrindo microfone…",
+    recording: "Gravando · até 60 segundos",
+    transcribing: "Transcrevendo em português…",
+    synthesizing: "Preparando a voz…",
+    playing: "Reproduzindo a resposta…",
+    stopping: "Interrompendo áudio…",
+  })[voiceStage as Exclude<typeof voiceStage, "error">];
   const renameValidation = renameDialog ? validateConversationTitle(renameDialog.value) : null;
   const matching = conversations.filter((conversation) => conversation.messages.length > 0 && (conversation.title ?? "Conversa sem título").toLowerCase().includes(search.toLowerCase()));
   const orderedMatching = orderConversations(matching, sidebarPreferences.sorting, sidebarPreferences.manualOrder);
@@ -496,6 +518,7 @@ function App() {
   const confirmDeleteConversation = () => {
     if (!deleteDialogId) return;
     const id = deleteDialogId;
+    dictatedDrafts.current.delete(id);
     const next = conversations.find((item) => item.id !== id && !item.archived);
     setConversations((items) => removeConversation(items, id));
     if (activeId === id) {
@@ -525,6 +548,7 @@ function App() {
   };
 
   const updateActiveDraft = (value: string) => {
+    if (!value.trim()) dictatedDrafts.current.delete(active.id);
     setDraftsByConversation((drafts) => setConversationDraft(drafts, active.id, value));
   };
 
@@ -561,14 +585,16 @@ function App() {
   const sendMessage = async (event?: FormEvent, retryMessageId?: string) => {
     event?.preventDefault();
     if (chatStoreStatus === "checking") return;
-    const conversation = conversations.find((item) => item.id === activeId);
-    if (!conversation || activeRequestsRef.current.has(conversation.id)) return;
+    const conversation = active;
+    if (activeRequestsRef.current.has(conversation.id)) return;
     const retrying = retryMessageId
       ? conversation.messages.find((message) => message.id === retryMessageId && message.role === "user" && message.delivery === "failed")
       : undefined;
     if (retryMessageId && !retrying) return;
     const content = retrying?.content ?? draft.trim();
     if (!content) return;
+    const readAnswer = !retrying && dictatedDrafts.current.delete(conversation.id);
+    if (activeId !== conversation.id) setActiveId(conversation.id);
 
     const requestContext = createRequestContext(conversation.id, crypto.randomUUID(), model);
     const { conversationId, requestId, model: requestedModel } = requestContext;
@@ -595,7 +621,7 @@ function App() {
     setStreamingByConversation((items) => ({ ...items, [conversationId]: { requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
     setErrorsByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
     if (!retrying) setDraftsByConversation((drafts) => setConversationDraft(drafts, conversationId, ""));
-    setConversations((items) => items.map((item) => {
+    setConversations((items) => (items.length ? items : [conversation]).map((item) => {
       if (item.id !== conversationId) return item;
       const messages = retrying
         ? item.messages.map((message) => message.id === retrying.id ? userMessage : message)
@@ -664,6 +690,7 @@ function App() {
         }).map((item) => item.id === conversationId ? { ...item, updatedAt: Date.now() } : item);
       });
       firstContentVisibleRef.current.delete(requestId);
+      if (readAnswer) void voice.speak(conversationId, completion.content || answer);
     } catch (error) {
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
       const result = normalizeOllamaError(error);
@@ -888,6 +915,7 @@ function App() {
                   {message.role === "assistant" ? <div className="assistant-markdown"><MarkdownMessage content={message.content} /></div> : <p>{message.content}</p>}
                   {message.role === "assistant" && <div className="message-actions">
                     <button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(message.requestId ?? message.id ?? `${active.id}-${index}`, message.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>
+                    {message.delivery !== "failed" && message.content.trim() && <button type="button" className="copy-response" disabled={voiceBusy} onClick={() => void voice.speak(active.id, message.content)}><Icon name="speaker" size={15} /> Ouvir resposta</button>}
                     {copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`] && <span className={`copy-feedback ${copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "failed" : ""}`} role={copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[message.requestId ?? message.id ?? `${active.id}-${index}`].label}</span>}
                   </div>}
                   {message.delivery === "failed" && <div className="message-failure-label">{message.role === "assistant" ? "Resposta interrompida · não será enviada no próximo contexto" : "Envio falhou · pergunta preservada"}</div>}
@@ -906,7 +934,25 @@ function App() {
           <div className="composer-wrap">
             <form className="composer" onSubmit={sendMessage}>
               <textarea ref={textarea} rows={1} value={draft} onChange={(event) => updateActiveDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="Pergunte qualquer coisa ao Aurion..." aria-label="Mensagem" aria-describedby="composer-hint" />
-              <div className="composer-bottom"><div className="composer-tools"><span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span></div>{activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem" title="Enviar mensagem"><Icon name="send" size={16} /></button>}</div>
+              <div className="composer-bottom">
+                <div className="composer-tools">
+                  <button type="button" className="voice-button" data-stage={voiceStage}
+                    disabled={chatStoreStatus === "checking" || voiceStage === "stopping"}
+                    aria-label={voiceStage === "recording" ? "Encerrar gravação e transcrever" : voiceBusy ? "Interromper operação de voz" : "Gravar mensagem"}
+                    title={voiceStage === "recording" ? "Encerrar gravação e transcrever" : voiceBusy ? "Interromper operação de voz" : "Gravar mensagem"}
+                    onClick={() => {
+                      if (voiceStage === "recording") void voice.finishCapture();
+                      else if (voiceBusy) voice.stop();
+                      else void voice.startCapture();
+                    }}>
+                    <Icon name={voiceBusy ? "stop" : "mic"} size={16} />
+                  </button>
+                  <span className="composer-hint" id="composer-hint">Enter para enviar <span>·</span> Shift + Enter para nova linha</span>
+                </div>
+                {activeRequestId ? <button type="button" className="send-button cancel-generation" onClick={() => cancelGeneration(active.id, activeRequestId)} aria-label="Parar geração" title="Parar geração"><Icon name="stop" size={15} /></button> : <button className={`send-button ${draft.trim() ? "ready" : ""}`} type="submit" disabled={!draft.trim() || chatStoreStatus === "checking"} aria-label="Enviar mensagem" title="Enviar mensagem"><Icon name="send" size={16} /></button>}
+              </div>
+              {voice.state.stage === "error" ? <p className="voice-feedback voice-error" role="alert">{voiceNote}</p> :
+                <div className="voice-feedback" role="status">{voiceNote || (draft.trim() && dictatedDrafts.current.has(active.id) ? "Revise a transcrição e envie para ouvir a resposta." : "")}</div>}
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> As conversas são processadas localmente no seu computador.</p>
           </div>

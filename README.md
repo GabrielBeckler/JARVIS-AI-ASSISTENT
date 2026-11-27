@@ -13,6 +13,7 @@ Assistente desktop local em desenvolvimento, feito com Tauri 2, React, TypeScrip
 - [Instalação no Fedora](#instalação-no-fedora)
 - [Configuração do ambiente](#configuração-do-ambiente)
 - [Configuração do Ollama](#configuração-do-ollama)
+- [Conversa por voz no Fedora](#conversa-por-voz-no-fedora)
 - [Execução e build](#execução-e-build)
 - [Privacidade e segurança](#privacidade-e-segurança)
 - [Estrutura do repositório](#estrutura-do-repositório)
@@ -47,7 +48,7 @@ O uso do Ollama e a execução local do modelo não exigem uma conta ou uma API 
 | Monitoramento de CPU, GPU, RAM e temperaturas | Coleta local independente por campo; sensores indisponíveis aparecem como N/D |
 | Renderização de respostas | Markdown sem HTML bruto nem imagens remotas automáticas; links são filtrados |
 | Cadastro, pesquisa e permissões de projetos | Gestão de projetos ainda não implementada; a busca atual pesquisa títulos de conversas |
-| Wake word, captura, STT e TTS | Não implementados; o botão de microfone está indisponível |
+| Conversa por voz | Microfone, transcrição local e leitura de respostas. Requer PipeWire, whisper.cpp e Piper instalados |
 | Empacotamento e validação do RPM | Ainda não validados |
 
 O SQLite é a fonte persistente principal depois da inicialização. Conversas antigas em `localStorage` são importadas em uma transação e a chave original não é removida. Os dados do dashboard são leituras da máquina atual, não um inventário fixo de hardware.
@@ -150,6 +151,49 @@ curl http://127.0.0.1:11434/api/tags
 
 O React chama comandos assíncronos Tauri; o backend Rust faz as requisições para o endereço configurado, que deve ser HTTP em loopback (`localhost` ou `127.0.0.1`). Assim, o WebView não acessa a API do Ollama diretamente e não precisa de configuração CORS. O backend rejeita endereços remotos. Mantenha o Ollama vinculado a loopback; não exponha a API em `0.0.0.0`.
 
+## Conversa por voz no Fedora
+
+Instale as ferramentas abaixo na sessão de usuário que roda o Aurion. A voz usa a entrada e a saída padrão configuradas no Fedora. Depois da instalação e dos downloads, gravação, transcrição e síntese funcionam localmente.
+
+```bash
+sudo dnf install pipewire-utils wireplumber git cmake gcc-c++ make curl python3 python3-pip
+
+voice_dir="${XDG_DATA_HOME:-$HOME/.local/share}/br.com.jarvis.ai/voice"
+mkdir -p "$voice_dir"
+whisper_src="$(mktemp -d)/whisper.cpp"
+git clone --depth 1 --branch v1.9.6 https://github.com/ggml-org/whisper.cpp.git "$whisper_src"
+cmake -S "$whisper_src" -B "$whisper_src/build" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_INSTALL_PREFIX="$voice_dir/whisper"
+cmake --build "$whisper_src/build" --config Release --parallel
+cmake --install "$whisper_src/build"
+curl -fL --retry 2 -o "$voice_dir/ggml-base.bin" \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+
+python3 -m venv "$voice_dir/venv"
+"$voice_dir/venv/bin/python" -m pip install 'piper-tts==1.8.0'
+piper_source="https://huggingface.co/rhasspy/piper-voices/resolve/2f358b6a560e3a913ebf509b2f3344f20b367f94/pt/pt_BR/faber/medium"
+for file in pt_BR-faber-medium.onnx pt_BR-faber-medium.onnx.json MODEL_CARD; do
+  curl -fL --retry 2 -o "$voice_dir/$file" "$piper_source/$file"
+done
+```
+
+O Aurion procura o Whisper e o Piper nos caminhos instalados acima e aceita os executáveis `whisper-cli` e `piper` no PATH como alternativa. Para usar outra pasta com os modelos e executáveis locais, defina `AURION_VOICE_DIR` no ambiente do processo Tauri. O arquivo `ggml-base.bin` deve ser a versão multilíngue. O Whisper recebe `-l pt` e transcreve sem traduzir. A voz Faber é `pt_BR`.
+
+### Fontes e licenças
+
+- O [whisper.cpp](https://github.com/ggml-org/whisper.cpp/blob/v1.9.6/LICENSE) e os [pesos Whisper em formato GGML](https://huggingface.co/ggerganov/whisper.cpp) usam MIT.
+- O [motor Piper](https://github.com/OHF-Voice/piper1-gpl/blob/main/COPYING) usa GPLv3 e roda como executável separado. A revisão indicada do [modelo Faber](https://huggingface.co/rhasspy/piper-voices/commit/2f358b6a560e3a913ebf509b2f3344f20b367f94) foi treinada com um conjunto CC0 e parte da base Hi-Fi TTS de Cori Samuel (leitora 92), sob CC BY 4.0. Preserve essa atribuição conforme o [guia de licenças das vozes do Piper](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/LICENSING.md). Os pesos são baixados separadamente do aplicativo.
+
+### Teste no Aurion
+
+1. Confira os dispositivos padrão no painel de som do Fedora ou com `wpctl status`. Abra o aplicativo com `npm run tauri dev` e confirme que o modelo Ollama aparece como pronto na aba **IA**.
+2. Clique no microfone, fale em português e clique novamente para transcrever. A gravação também termina ao atingir 60 segundos. Revise a transcrição no campo de mensagem e clique em enviar. Se já havia texto no campo, a transcrição é acrescentada.
+3. Aguarde o Ollama terminar a resposta. O Aurion prepara a voz e toca o áudio. Para interromper, use o botão de voz no campo de mensagem. **Ouvir resposta** também permite reproduzir uma resposta escrita ou já salva.
+4. Confira que é possível continuar digitando e enviando mensagens quando as ferramentas de voz estão ausentes.
+
+Os arquivos temporários de áudio e de texto são removidos ao terminar a operação. Só o conteúdo enviado entra no histórico de conversas.
+
 ## Execução e build
 
 | Comando | Finalidade |
@@ -168,7 +212,7 @@ O suporte a RPM aparece como meta na especificação do produto, mas a configura
 - O download inicial do Ollama e do modelo requer internet. Este protótipo não chama uma API comercial.
 - O app não captura áudio atualmente. Não há gravação de áudio ou transcrição implementada.
 - `.env.local` pode conter configurações locais; nunca adicione arquivos `.env` ao Git. O `.env.example` deve conter somente valores públicos e genéricos.
-- Permissões por projeto, confirmação de ações do agente e recursos de voz ainda não existem. A coleta de temperatura e estatísticas da GPU depende do driver e dos sensores disponíveis; velocidade da RAM pode não estar acessível sem uma fonte EDAC/SMBIOS legível.
+- Permissões por projeto, confirmação de ações do agente e ativação pela frase “Ei, Aurion” ainda não foram implementadas. A coleta de temperatura e estatísticas da GPU depende do driver e dos sensores disponíveis; velocidade da RAM pode não estar acessível sem uma fonte EDAC/SMBIOS legível.
 
 ## Estrutura do repositório
 

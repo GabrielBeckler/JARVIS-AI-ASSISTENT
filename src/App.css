@@ -183,7 +183,14 @@ button { color: inherit; }
 .composer textarea::placeholder { color: var(--muted); }
 .composer-bottom, .composer-tools { display: flex; align-items: center; }
 .composer-bottom { justify-content: space-between; }
-.composer-tools { min-width: 0; }
+.composer-tools { min-width: 0; gap: 8px; }
+.voice-button { display: inline-grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--panel-raised); color: var(--accent); cursor: pointer; }
+.voice-button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-hover); }
+.voice-button[data-stage="recording"] { border-color: var(--danger); color: var(--danger); }
+.voice-button:disabled, .message-actions button:disabled { color: var(--muted); cursor: not-allowed; }
+.voice-feedback { margin: 4px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.voice-feedback:empty { margin: 0; }
+.voice-error { color: var(--danger); }
 .composer-hint { color: var(--muted); font-size: 12px; }.composer-hint span { padding: 0 3px; color: var(--border-strong); }
 .send-button { display: grid; width: 34px; height: 34px; flex-shrink: 0; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-raised); color: var(--muted); cursor: not-allowed; transition: .16s; }
 .send-button.ready { border-color: var(--accent); background: var(--accent); color: var(--canvas); cursor: pointer; }
@@ -225,7 +232,7 @@ button { color: inherit; }
 .assistant-markdown a:focus-visible { border-radius: 2px; outline: 2px solid var(--accent); outline-offset: 3px; }
 .markdown-link-blocked { color: var(--text); text-decoration: underline dotted; text-decoration-color: var(--muted); }
 .response-metrics { margin-top: 6px; color: var(--muted); font: 12px var(--font-code); line-height: 1.5; }
-.message-actions { display: flex; min-height: 30px; align-items: center; gap: 8px; margin-top: 5px; }
+.message-actions { display: flex; flex-wrap: wrap; min-height: 30px; align-items: center; gap: 8px; margin-top: 5px; }
 .copy-response { display: inline-flex; min-height: 30px; align-items: center; gap: 6px; padding: 3px 7px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; }
 .copy-response:hover { border-color: var(--muted); background: var(--panel-raised); color: var(--accent); }
 .copy-feedback { color: var(--accent); font-size: 12px; }

@@ -1,6 +1,7 @@
 mod chat_store;
 mod ollama;
 mod system_metrics;
+mod voice;
 
 use serde::Serialize;
 use std::{
@@ -149,6 +150,13 @@ mod export_tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(voice::VoiceState::default())
+        .on_window_event(|window, event| {
+            use tauri::Manager;
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<voice::VoiceState>().shutdown();
+            }
+        })
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -161,7 +169,11 @@ pub fn run() {
             ollama_list_models,
             ollama_chat,
             ollama_cancel_chat,
-            export_markdown_dialog
+            export_markdown_dialog,
+            voice::voice_reserve,
+            voice::voice_capture,
+            voice::voice_speak,
+            voice::voice_control
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
