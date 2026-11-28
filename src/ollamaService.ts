@@ -1,8 +1,9 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { WebSource } from "./webSearch.js";
 
-export type LocalAction = "search" | "list_directory" | "read_file" | "open_project" | "inspect_path";
-export type LocalIntent = { action: LocalAction; fileName?: string; projectName?: string; searchRoot?: string; downloads?: boolean; fileFilter?: "all" | "images" | "pdf"; recursive?: boolean; clarification?: string };
+export type LocalAction = "search" | "list_directory" | "read_file" | "open_project" | "inspect_path" | "open_item" | "reveal_item";
+export type TargetKind = LocalEntry["kind"] | "image" | "pdf" | "video";
+export type LocalIntent = { action: LocalAction; fileName?: string; projectName?: string; searchRoot?: string; downloads?: boolean; fileFilter?: "all" | "images" | "pdf"; recursive?: boolean; targetKind?: TargetKind; clarification?: string };
 export type LocalEntry = { path: string; kind: "file" | "directory" };
 export type LocalToolResult = { action: LocalAction; status: "success" | "ambiguous" | "error" | "not_found" | "clarification"; message: string; results: LocalEntry[]; path: string | null; content: string | null; truncated: boolean };
 

@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
+    ffi::OsStr,
     fs,
-    io::Read,
+    io::{Read, Seek},
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -23,6 +24,8 @@ pub enum LocalAction {
     ReadFile,
     OpenProject,
     InspectPath,
+    OpenItem,
+    RevealItem,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,7 +39,12 @@ pub struct LocalToolRequest {
     pub downloads: Option<bool>,
     pub file_filter: Option<DownloadFilter>,
     pub recursive: Option<bool>,
+    pub target_kind: Option<TargetKind>,
 }
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetKind { File, Directory, Image, Pdf, Video }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -84,6 +92,8 @@ fn action_name(action: LocalAction) -> &'static str {
         LocalAction::ReadFile => "read_file",
         LocalAction::OpenProject => "open_project",
         LocalAction::InspectPath => "inspect_path",
+        LocalAction::OpenItem => "open_item",
+        LocalAction::RevealItem => "reveal_item",
     }
 }
 
@@ -153,6 +163,7 @@ fn walk_ranked(
     needle: &str,
     desired: Option<&str>,
     stop_after_root: Option<u8>,
+    accept: impl Fn(&Path, bool) -> bool,
     rank: impl Fn(&Path, bool) -> u8,
 ) -> (Vec<LocalEntry>, bool, bool) {
     let start = Instant::now();
@@ -227,6 +238,7 @@ fn walk_ranked(
             if !needle.is_empty()
                 && name.contains(&needle)
                 && desired.is_none_or(|wanted| wanted == label)
+                && accept(&path, is_dir)
             {
                 let score = rank(&path, name == needle);
                 if best_rank.is_none_or(|best| score > best) {
@@ -248,6 +260,8 @@ fn walk_ranked(
                 } else {
                     limited = true;
                 }
+            } else if is_dir {
+                limited = true;
             }
         }
     }
@@ -256,11 +270,11 @@ fn walk_ranked(
 }
 
 fn walk(root: &Path, needle: &str, desired: Option<&str>) -> (Vec<LocalEntry>, bool, bool) {
-    walk_ranked(root, needle, desired, None, |_, _| 0)
+    walk_ranked(root, needle, desired, None, |_, _| true, |_, _| 0)
 }
 
 fn ranked_projects(root: &Path, name: &str, preferred: &Path) -> (Vec<LocalEntry>, bool, bool) {
-    walk_ranked(root, name, Some("directory"), None, |path, exact| {
+    walk_ranked(root, name, Some("directory"), None, |_, _| true, |path, exact| {
         let has_marker = [
             ".git",
             "package.json",
@@ -284,6 +298,7 @@ fn scoped_files(root: &Path, name: &str, in_project: bool) -> (Vec<LocalEntry>, 
         name,
         Some("file"),
         in_project.then_some(3),
+        |_, _| true,
         |path, exact| u8::from(exact) * 2 + u8::from(in_project && path.parent() == Some(root)),
     )
 }
@@ -391,7 +406,14 @@ fn inspect_path(request: &LocalToolRequest) -> LocalToolResult {
         Ok(_) => ("error", "Informe o caminho de um arquivo ou pasta.".into()),
         Err(error) => ("error", error),
     };
-    LocalToolResult::new("inspect_path", status, message)
+    let mut result = LocalToolResult::new("inspect_path", status, message);
+    if status == "clarification" {
+        if let Some(path) = request.selected_path.as_deref() {
+            let path = Path::new(path);
+            result.results.push(entry(path, if path.is_dir() { "directory" } else { "file" }));
+        }
+    }
+    result
 }
 
 fn search(request: &LocalToolRequest) -> LocalToolResult {
@@ -461,6 +483,7 @@ fn search(request: &LocalToolRequest) -> LocalToolResult {
                 ),
             );
             result.results = files;
+            result.truncated = file_limited || file_denied;
             if file_denied {
                 result
                     .message
@@ -502,6 +525,7 @@ fn search(request: &LocalToolRequest) -> LocalToolResult {
         ),
     );
     result.results = files;
+    result.truncated = limited || denied;
     result
 }
 
@@ -510,17 +534,18 @@ fn list_directory_at(target: &Path) -> LocalToolResult {
     let read = match fs::read_dir(target) { Ok(items) => items, Err(error) => return LocalToolResult::new("list_directory", "error", format!("Não foi possível listar {}: {error}", display_path(target))) };
     let mut items = Vec::new();
     let mut denied = false;
-    for item in read.take(MAX_LISTING + 1) {
+    for item in read {
         let item = match item { Ok(item) => item, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => { denied = true; continue; }, Err(_) => continue };
         let kind = match item.file_type() { Ok(kind) => kind, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => { denied = true; continue; }, Err(_) => continue };
-        if kind.is_symlink() { continue; }
+        if !kind.is_dir() && !kind.is_file() { continue; }
         items.push(entry(&item.path(), if kind.is_dir() { "directory" } else { "file" }));
+        if items.len() > MAX_LISTING { break; }
     }
-    items.sort_by(|a, b| normalized(&a.path).cmp(&normalized(&b.path)));
+    items.sort_by(|a, b| normalized(&a.path).cmp(&normalized(&b.path)).then_with(|| a.path.cmp(&b.path)));
     let truncated = items.len() > MAX_LISTING;
     items.truncate(MAX_LISTING);
     let mut result = LocalToolResult::new("list_directory", "success", format!("Conteúdo de {} ({} item(ns) mostrado(s)){}{}:", display_path(target), items.len(), if truncated { "; lista limitada a 100 itens" } else { "" }, if denied { "; alguns itens foram omitidos por permissão negada" } else { "" }));
-    result.path = Some(display_path(target)); result.results = items; result.truncated = truncated; result
+    result.path = Some(display_path(target)); result.results = items; result.truncated = truncated || denied; result
 }
 
 fn matches_download_filter(path: &Path, filter: DownloadFilter) -> bool {
@@ -577,8 +602,12 @@ fn list_downloads_at(root: &Path, filter: DownloadFilter, recursive: bool) -> Lo
                 if filter == DownloadFilter::All {
                     items.push(entry(&path, "directory"));
                 }
-                if recursive && depth < MAX_DEPTH {
-                    if pending.len() < MAX_VISITED { pending.push_back((path.clone(), depth + 1)); } else { truncated = true; }
+                if recursive {
+                    if depth < MAX_DEPTH && pending.len() < MAX_VISITED {
+                        pending.push_back((path, depth + 1));
+                    } else {
+                        truncated = true;
+                    }
                 }
             } else if kind.is_file() && matches_download_filter(&path, filter) {
                 items.push(entry(&path, "file"));
@@ -603,7 +632,7 @@ fn list_downloads_at(root: &Path, filter: DownloadFilter, recursive: bool) -> Lo
     let mut result = LocalToolResult::new("list_directory", "success", message);
     result.path = Some(display_path(root));
     result.results = items;
-    result.truncated = truncated;
+    result.truncated = truncated || denied;
     result
 }
 
@@ -668,6 +697,7 @@ fn read_file_at(path: &Path) -> LocalToolResult {
         ),
     );
     result.path = Some(display_path(path));
+    result.results.push(entry(path, "file"));
     result.content = Some(content);
     result.truncated = truncated;
     result
@@ -786,7 +816,7 @@ fn read_file(request: &LocalToolRequest) -> LocalToolResult {
 fn open_project_at(path: &Path) -> LocalToolResult {
     if !path.is_dir() { return LocalToolResult::new("open_project", "error", format!("A pasta foi removida ou não pode ser acessada: {}", display_path(path))); }
     match launch_code(std::ffi::OsStr::new("code"), path) {
-        Ok(_child) => { let mut result = LocalToolResult::new("open_project", "success", format!("Iniciei o VS Code para {}.", display_path(path))); result.path = Some(display_path(path)); result }
+        Ok(_child) => { let mut result = LocalToolResult::new("open_project", "success", format!("Iniciei o VS Code para {}.", display_path(path))); result.path = Some(display_path(path)); result.results.push(entry(path, "directory")); result }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalToolResult::new("open_project", "error", "Não encontrei o comando `code`. Instale/ative o comando do VS Code no PATH e tente novamente."),
         Err(error) => LocalToolResult::new("open_project", "error", format!("Não foi possível iniciar o VS Code para {}: {error}", display_path(path))),
     }
@@ -801,8 +831,160 @@ fn open_project(request: &LocalToolRequest) -> LocalToolResult {
     open_project_at(&project)
 }
 
+fn matches_target(path: &Path, is_dir: bool, kind: Option<TargetKind>) -> bool {
+    use TargetKind::*;
+    match kind {
+        None => true,
+        Some(File) => !is_dir,
+        Some(Directory) => is_dir,
+        Some(kind) if !is_dir => {
+            let extension = path.extension().and_then(OsStr::to_str).unwrap_or("").to_ascii_lowercase();
+            match kind {
+                Image => matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "tif" | "tiff" | "avif" | "heic"),
+                Pdf => extension == "pdf",
+                Video => matches!(extension.as_str(), "mp4" | "mkv" | "webm" | "mov" | "avi" | "mpeg" | "mpg" | "m4v" | "ogv"),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn open_default(program: &OsStr, path: &Path) -> Result<(), String> {
+    let diagnostic_error = |error| format!("Não foi possível ler o diagnóstico da abertura: {error}");
+    // A GUI launched by GIO can keep stderr open after GIO exits. A file lets us
+    // collect diagnostics without waiting for the GUI to close its descriptors.
+    let mut diagnostics = tempfile::tempfile().map_err(diagnostic_error)?;
+    let status = Command::new(program)
+        .args(["open", "--"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(diagnostics.try_clone().map_err(diagnostic_error)?)
+        .status()
+        .map_err(|error| format!("Não foi possível iniciar a abertura pelo sistema: {error}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    diagnostics.rewind().map_err(diagnostic_error)?;
+    let mut bytes = Vec::new();
+    diagnostics.take(4096).read_to_end(&mut bytes).map_err(diagnostic_error)?;
+    let detail = String::from_utf8_lossy(&bytes);
+    if detail.trim().is_empty() {
+        Err(format!("O sistema recusou a abertura ({status})"))
+    } else {
+        Err(detail.trim().to_owned())
+    }
+}
+
+fn reveal_with_file_manager(path: &Path) -> bool {
+    let Ok(uri) = tauri::Url::from_file_path(path) else { return false };
+    // URI serialization escapes quotes and other characters special to GVariant.
+    let uris = format!("[\"{uri}\"]");
+    Command::new("gdbus")
+        .args(["call", "--session", "--timeout", "5", "--dest", "org.freedesktop.FileManager1",
+            "--object-path", "/org/freedesktop/FileManager1", "--method",
+            "org.freedesktop.FileManager1.ShowItems"])
+        .args([uris.as_str(), ""])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn open_item_at(
+    action: LocalAction,
+    path: &Path,
+    kind: Option<TargetKind>,
+    open: impl FnOnce(&Path) -> Result<(), String>,
+    reveal: impl FnOnce(&Path) -> bool,
+) -> LocalToolResult {
+    let action_name = action_name(action);
+    let fail = |message: String| LocalToolResult::new(action_name, "error", message);
+    let name = display_path(path);
+    if !path.is_absolute() {
+        return fail("Informe um caminho absoluto.".into());
+    }
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return fail(format!("O caminho não existe ou foi removido: {name}."));
+        }
+        Err(error) => return fail(format!("Não foi possível acessar {name}: {error}")),
+    };
+    let is_dir = metadata.is_dir();
+    if !(is_dir || metadata.is_file()) || !matches_target(path, is_dir, kind) {
+        return fail(format!("O caminho não corresponde ao tipo de item solicitado: {name}."));
+    }
+    let access = if is_dir {
+        fs::read_dir(path).map(|_| ())
+    } else {
+        fs::File::open(path).map(|_| ())
+    };
+    if let Err(error) = access {
+        return fail(format!("Não foi possível acessar {name}: {error}"));
+    }
+    let result = if matches!(action, LocalAction::RevealItem) {
+        if reveal(path) {
+            Ok("O gerenciador de arquivos aceitou o pedido para mostrar o item.".into())
+        } else if let Some(parent) = path.parent() {
+            open(parent).map(|()| format!("Abri a pasta {}. A seleção do item não está disponível.", display_path(parent)))
+        } else {
+            Err("O caminho não tem uma pasta pai.".into())
+        }
+    } else {
+        open(path).map(|()| if is_dir { "Abri a pasta no gerenciador de arquivos padrão.".into() }
+            else { "Abri o arquivo no aplicativo padrão.".into() })
+    };
+    match result {
+        Ok(message) => {
+            let mut result = LocalToolResult::new(action_name, "success", message);
+            result.path = Some(name);
+            result.results.push(entry(path, if is_dir { "directory" } else { "file" }));
+            result
+        }
+        Err(error) => fail(format!("Não foi possível abrir {name}: {error}")),
+    }
+}
+
+fn find_open_candidates(root: &Path, name: &str, kind: Option<TargetKind>) -> (Vec<LocalEntry>, bool, bool) {
+    walk_ranked(root, name, None, None, |path, is_dir| matches_target(path, is_dir, kind), |_, exact| u8::from(exact))
+}
+
+fn open_local_item(request: &LocalToolRequest) -> LocalToolResult {
+    let action = action_name(request.action);
+    let path = if let Some(path) = &request.selected_path {
+        PathBuf::from(path)
+    } else {
+        let Some(name) = request.file_name.as_deref().filter(|name| !name.trim().is_empty()) else {
+            return LocalToolResult::new(action, "clarification", "Informe o nome ou o caminho completo do item.");
+        };
+        let root = if request.downloads == Some(true) { downloads_dir() } else { resolve_search_root(request) };
+        let root = match root {
+            Ok(root) => root,
+            Err(error) => return LocalToolResult::new(action, "error", error),
+        };
+        if let Err(error) = fs::read_dir(&root) {
+            return LocalToolResult::new(action, "error", format!("Não foi possível consultar {}: {error}", display_path(&root)));
+        }
+        let (mut candidates, limited, denied) = find_open_candidates(&root, name, request.target_kind);
+        if candidates.len() > 1 {
+            return ambiguous(action, format!("Encontrei mais de um item compatível com “{name}”. Escolha qual devo abrir:"), candidates);
+        }
+        if limited || denied {
+            return LocalToolResult::new(action, "clarification", "A busca ficou incompleta. Informe o caminho completo do item que devo abrir.");
+        }
+        let Some(candidate) = candidates.pop() else {
+            return missing_after_search(action, &format!("“{name}”"), &root, false, false);
+        };
+        PathBuf::from(candidate.path)
+    };
+    open_item_at(request.action, &path, request.target_kind, |path| open_default(OsStr::new("gio"), path), reveal_with_file_manager)
+}
+
 fn execute_inner(request: &LocalToolRequest) -> LocalToolResult {
     let action = action_name(request.action);
+    if matches!(request.action, LocalAction::OpenItem | LocalAction::RevealItem) {
+        return open_local_item(request);
+    }
     for (label, value) in [
         ("nome do arquivo", request.file_name.as_deref()),
         ("nome do projeto", request.project_name.as_deref()),
@@ -823,6 +1005,7 @@ fn execute_inner(request: &LocalToolRequest) -> LocalToolResult {
         LocalAction::ReadFile => read_file(request),
         LocalAction::OpenProject => open_project(request),
         LocalAction::InspectPath => inspect_path(request),
+        LocalAction::OpenItem | LocalAction::RevealItem => unreachable!(),
     }
 }
 
@@ -838,7 +1021,101 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     fn request(action: LocalAction, file: Option<&str>, project: Option<&str>, root: Option<&Path>, selected: Option<&Path>) -> LocalToolRequest {
-        LocalToolRequest { action, file_name: file.map(str::to_owned), project_name: project.map(str::to_owned), search_root: root.map(|path| path.to_string_lossy().into_owned()), selected_path: selected.map(|path| path.to_string_lossy().into_owned()), downloads: None, file_filter: None, recursive: None }
+        LocalToolRequest { action, file_name: file.map(str::to_owned), project_name: project.map(str::to_owned), search_root: root.map(|path| path.to_string_lossy().into_owned()), selected_path: selected.map(|path| path.to_string_lossy().into_owned()), downloads: None, file_filter: None, recursive: None, target_kind: None }
+    }
+
+    #[test]
+    fn opening_passes_each_real_path_as_one_argument_to_the_simulated_desktop() {
+        let temp = tempfile::tempdir().unwrap();
+        let opener = temp.path().join("simulated-gio");
+        fs::write(&opener, "#!/bin/sh\n[ \"$#\" = 3 ] && [ \"$1\" = open ] && [ \"$2\" = -- ] || exit 1\nprintf '%s' \"$3\" > \"$0.capture\"\n").unwrap();
+        fs::set_permissions(&opener, fs::Permissions::from_mode(0o700)).unwrap();
+        let open = |path: &Path| open_default(opener.as_os_str(), path);
+        let directory = temp.path().join("Pasta com acento é");
+        fs::create_dir(&directory).unwrap();
+        let paths = [
+            ("ação ' & \".JPEG", TargetKind::Image),
+            ("A terceira margem do rio.PDF", TargetKind::Pdf),
+            ("vídeo [1].mp4", TargetKind::Video),
+            ("README.md", TargetKind::File),
+        ];
+        for (name, kind) in paths {
+            let path = directory.join(name);
+            fs::write(&path, "fixture").unwrap();
+            let result = open_item_at(LocalAction::OpenItem, &path, Some(kind), open, |_| unreachable!());
+            assert_eq!(result.status, "success");
+            assert_eq!(result.results[0].path, display_path(&path));
+            assert_eq!(fs::read_to_string(opener.with_extension("capture")).unwrap(), display_path(&path));
+        }
+        let result = open_item_at(LocalAction::OpenItem, &directory, Some(TargetKind::Directory), open, |_| unreachable!());
+        assert_eq!(result.status, "success");
+        assert_eq!(fs::read_to_string(opener.with_extension("capture")).unwrap(), display_path(&directory));
+    }
+
+    #[test]
+    fn ambiguous_pdf_request_returns_choices_and_accepts_a_revalidated_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("A TERCEIRA MARGEM DO RIO.pdf");
+        let second = temp.path().join("A TERCEIRA MARGEM DO RIO (cópia).PDF");
+        for path in [&first, &second, &temp.path().join("A TERCEIRA MARGEM DO RIO.txt")] {
+            fs::write(path, "fixture").unwrap();
+        }
+        let mut req = request(LocalAction::OpenItem, Some("A TERCEIRA MARGEM DO RIO"), None, Some(temp.path()), None);
+        req.target_kind = Some(TargetKind::Pdf);
+        let result = execute(req);
+        assert_eq!(result.status, "ambiguous");
+        assert_eq!(result.results.len(), 2);
+        let chosen = Path::new(&result.results[0].path);
+        let opened = open_item_at(LocalAction::OpenItem, chosen, Some(TargetKind::Pdf), |path| {
+            assert_eq!(path, chosen);
+            Ok(())
+        }, |_| unreachable!());
+        assert_eq!(opened.status, "success");
+    }
+
+    #[test]
+    fn opening_reports_removed_items_permission_errors_and_missing_handlers() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("relatório.txt");
+        fs::write(&file, "fixture").unwrap();
+        let fail = temp.path().join("simulated-gio");
+        fs::write(&fail, "#!/bin/sh\nprintf '%s' 'Nenhum aplicativo associado' >&2\nexit 2\n").unwrap();
+        fs::set_permissions(&fail, fs::Permissions::from_mode(0o700)).unwrap();
+        let result = open_item_at(LocalAction::OpenItem, &file, None, |path| open_default(fail.as_os_str(), path), |_| unreachable!());
+        assert_eq!(result.status, "error");
+        assert!(result.message.contains("Nenhum aplicativo associado"));
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&file).is_err() {
+            let denied = open_item_at(LocalAction::OpenItem, &file, None, |_| unreachable!(), |_| unreachable!());
+            assert_eq!(denied.status, "error");
+            assert!(denied.message.contains("Não foi possível acessar"));
+        }
+        let listed = list_directory_at(temp.path());
+        assert!(listed.results.iter().any(|entry| entry.path == display_path(&file)));
+        fs::remove_file(&file).unwrap();
+        let removed = open_item_at(LocalAction::OpenItem, &file, None, |_| unreachable!(), |_| unreachable!());
+        assert_eq!(removed.status, "error");
+        assert!(removed.message.contains("foi removido"));
+    }
+
+    #[test]
+    fn revealing_uses_selection_when_available_and_reports_parent_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("Foto única.png");
+        fs::write(&path, "fixture").unwrap();
+        let selected = open_item_at(LocalAction::RevealItem, &path, None, |_| unreachable!(), |item| {
+            assert_eq!(item, path);
+            true
+        });
+        assert_eq!(selected.status, "success");
+        assert!(selected.message.contains("aceitou"));
+        let fallback = open_item_at(LocalAction::RevealItem, &path, None, |parent| {
+            assert_eq!(parent, temp.path());
+            Ok(())
+        }, |_| false);
+        assert_eq!(fallback.status, "success");
+        assert!(fallback.message.contains("A seleção do item não está disponível"));
     }
 
     #[test]
