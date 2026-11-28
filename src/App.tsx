@@ -2,7 +2,7 @@ import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboard
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
 import { createLocalChatInstructions, isModelInstalled, limitChatContext, resolveChatThinking, toChatContext, type StoredMessage } from "./ollama.js";
 import { cancelOllamaChat, executeLocalTool, listOllamaModels, normalizeOllamaError, streamOllamaChat, type LocalIntent, type LocalEntry } from "./ollamaService";
-import { localActionFor, localResultText } from "./localTools.js";
+import { LOCAL_TOOL_MODEL, localRequestFor, localResultText } from "./localTools.js";
 import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
 import { ThemedSelect } from "./ThemedSelect";
@@ -141,7 +141,8 @@ function App() {
   const draft = getConversationDraft(draftsByConversation, active.id);
   const dictatedDrafts = useRef(new Set<string>());
   const dictatedQuestions = useRef(new Set<string>());
-  const draftSendsWebQuery = Boolean(searchQueryFor(draft, {
+  const pendingLocalMessage = [...active.messages].reverse().find((message) => message.id && localChoices[message.id]);
+  const draftSendsWebQuery = !localRequestFor(draft) && Boolean(searchQueryFor(draft, {
     systemQuestion: isSystemQuestion(draft, toChatContext(active.messages)), history: active.messages,
   }));
   const voice = useLocalVoice(active.id, (id, text) => {
@@ -594,7 +595,7 @@ function App() {
     });
   };
 
-  const sendMessage = async (event?: FormEvent, retryMessageId?: string) => {
+  const sendMessage = async (event?: FormEvent, retryMessageId?: string, localSelection?: { messageId: string; path: string }) => {
     event?.preventDefault();
     if (chatStoreStatus === "checking") return;
     const conversation = active;
@@ -603,11 +604,16 @@ function App() {
       ? conversation.messages.find((message) => message.id === retryMessageId && message.role === "user" && message.delivery === "failed")
       : undefined;
     if (retryMessageId && !retrying) return;
-    const content = retrying?.content ?? draft.trim();
+    const content = localSelection?.path ?? retrying?.content ?? draft.trim();
     if (!content) return;
+    const choiceId = localSelection?.messageId ?? pendingLocalMessage?.id;
+    const choice = choiceId ? localChoices[choiceId] : undefined;
+    if (localSelection && !choice?.entries.some((entry) => entry.path === localSelection.path)) return;
+    const localRequest = localRequestFor(content, choice?.intent);
+    const localIntent = localRequest?.intent;
     const readAnswer = retrying
       ? Boolean(retrying.id && dictatedQuestions.current.has(retrying.id))
-      : dictatedDrafts.current.delete(conversation.id);
+      : !localSelection && dictatedDrafts.current.delete(conversation.id);
     if (activeId !== conversation.id) setActiveId(conversation.id);
 
     const requestContext = createRequestContext(conversation.id, crypto.randomUUID(), model);
@@ -618,7 +624,6 @@ function App() {
     const searchHistory = retrying
       ? conversation.messages.slice(0, conversation.messages.indexOf(retrying))
       : conversation.messages;
-    const localIntent = localActionFor(content);
     const webQuery = localIntent ? undefined : searchQueryFor(content, { systemQuestion, history: searchHistory });
     const needsSystemContext = !webQuery && systemQuestion;
     const now = Date.now();
@@ -630,7 +635,7 @@ function App() {
       id: retrying?.id ?? crypto.randomUUID(),
       role: "user",
       content,
-      model: requestedModel,
+      model: localIntent ? LOCAL_TOOL_MODEL : requestedModel,
       createdAt: now,
       requestId,
       delivery: "pending",
@@ -638,11 +643,11 @@ function App() {
     if (readAnswer) dictatedQuestions.current.add(userMessage.id!);
     let answer = "";
 
-    statusCheckRef.current += 1;
+    if (!localIntent) statusCheckRef.current += 1;
     setRequestState(conversationId, requestId);
     setStreamingByConversation((items) => ({ ...items, [conversationId]: { webSearch: Boolean(webQuery), localStatus: localIntent ? localIntent.action === "open_project" ? "Abrindo projeto" : localIntent.action === "read_file" ? "Lendo arquivo" : localIntent.action === "list_directory" ? "Listando arquivos" : "Procurando arquivos" : undefined, requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
     setErrorsByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
-    if (!retrying) setDraftsByConversation((drafts) => setConversationDraft(drafts, conversationId, ""));
+    if (!retrying && !localSelection) setDraftsByConversation((drafts) => setConversationDraft(drafts, conversationId, ""));
     setConversations((items) => (items.length ? items : [conversation]).map((item) => {
       if (item.id !== conversationId) return item;
       const messages = retrying
@@ -657,31 +662,30 @@ function App() {
     }));
 
     try {
-      if (localIntent) {
-        if (localIntent.clarification) {
-          if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
-          const doneAt = Date.now();
-          setConversations((items) => {
-            const sent = updateMessage(items, conversationId, userMessage.id!, { delivery: "sent" });
-            return appendAssistantOnce(sent, conversationId, requestId, { id: crypto.randomUUID(), role: "assistant", content: localIntent.clarification!, model: "ferramenta local", createdAt: doneAt, requestId, delivery: "sent" })
-              .map((item) => item.id === conversationId ? { ...item, updatedAt: doneAt } : item);
-          });
-          if (readAnswer) voice.stopReply(requestId);
-          return;
-        }
-        const result = await executeLocalTool(localIntent);
+      if (localRequest) {
+        const { intent, selectedPath } = localRequest;
+        const result = intent.clarification ? null : await executeLocalTool(intent, selectedPath);
         if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+        const localAnswer = result ? localResultText(result) : intent.clarification!;
         const assistantMessageId = crypto.randomUUID();
         const nowDone = Date.now();
         setConversations((items) => {
           const sent = updateMessage(items, conversationId, userMessage.id!, { delivery: "sent" });
           return appendAssistantOnce(sent, conversationId, requestId, {
-            id: assistantMessageId, role: "assistant", content: localResultText(result), model: "ferramenta local",
+            id: assistantMessageId, role: "assistant", content: localAnswer, model: LOCAL_TOOL_MODEL,
             createdAt: nowDone, requestId, delivery: "sent",
           }).map((item) => item.id === conversationId ? { ...item, updatedAt: nowDone } : item);
         });
-        if (result.status === "ambiguous") setLocalChoices((choices) => ({ ...choices, [assistantMessageId]: { intent: localIntent, entries: result.results } }));
-        if (readAnswer) voice.stopReply(requestId);
+        if (result) setLocalChoices((choices) => {
+          const next = { ...choices };
+          if (choiceId && intent === choice?.intent && (result.status === "success" || result.status === "ambiguous")) delete next[choiceId];
+          if (result.status === "ambiguous") next[assistantMessageId] = { intent, entries: result.results };
+          return next;
+        });
+        if (readAnswer) {
+          dictatedQuestions.current.delete(userMessage.id!);
+          voice.finishReply(requestId, result?.message ?? localAnswer);
+        }
         return;
       }
       let systemContext = "";
@@ -752,7 +756,7 @@ function App() {
       if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
       if (readAnswer) voice.stopReply(requestId);
       const result = normalizeOllamaError(error);
-      if (result.kind !== "web_search") {
+      if (!localIntent && result.kind !== "web_search") {
         statusCheckRef.current += 1;
         if (["connection", "timeout", "configuration"].includes(result.kind)) {
           setServiceStatus("unavailable");
@@ -781,35 +785,6 @@ function App() {
         setRequestState(conversationId, null);
         setStreamingByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
         firstContentVisibleRef.current.delete(requestId);
-      }
-    }
-  };
-
-  const chooseLocalResult = async (messageId: string, choice: LocalChoice, selected: LocalEntry) => {
-    const conversation = conversations.find((item) => item.id === activeId);
-    if (!conversation || activeRequestsRef.current.has(conversation.id)) return;
-    const requestId = crypto.randomUUID();
-    const now = Date.now();
-    const startedAt = performance.now();
-    setLocalChoices((items) => { const next = { ...items }; delete next[messageId]; return next; });
-    setRequestState(conversation.id, requestId);
-    setStreamingByConversation((items) => ({ ...items, [conversation.id]: { webSearch: false, localStatus: choice.intent.action === "open_project" ? "Abrindo projeto" : choice.intent.action === "read_file" ? "Lendo arquivo" : choice.intent.action === "list_directory" ? "Listando arquivos" : "Procurando arquivos", requestId, content: "", model: "ferramenta local", createdAt: now, startedAt, firstContentMs: null } }));
-    try {
-      const result = await executeLocalTool(choice.intent, selected.path);
-      if (!isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) return;
-      const doneAt = Date.now();
-      setConversations((items) => appendAssistantOnce(items, conversation.id, requestId, {
-        id: crypto.randomUUID(), role: "assistant", content: localResultText(result), model: "ferramenta local", createdAt: doneAt, requestId, delivery: "sent",
-      }).map((item) => item.id === conversation.id ? { ...item, updatedAt: doneAt } : item));
-    } catch (error) {
-      if (!isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) return;
-      setConversations((items) => appendAssistantOnce(items, conversation.id, requestId, {
-        id: crypto.randomUUID(), role: "assistant", content: `Falha na ferramenta local: ${String(error)}`, model: "ferramenta local", createdAt: Date.now(), requestId, delivery: "sent",
-      }));
-    } finally {
-      if (isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) {
-        setRequestState(conversation.id, null);
-        setStreamingByConversation((items) => { const next = { ...items }; delete next[conversation.id]; return next; });
       }
     }
   };
@@ -1003,12 +978,12 @@ function App() {
                 <div className="message-content">
                   <div className="message-author"><span className="message-author-name">{message.role === "user" ? "Você" : "J"}</span><span>{message.model ?? "Modelo desconhecido"} · {messageTime(message.createdAt)}</span></div>
                   {message.role === "assistant" ? <div className="assistant-markdown">
-                    <MarkdownMessage content={withoutWebSources(message.content)} />
-                    <MarkdownMessage content={webSourcesMarkdown(message.content)} />
+                    <MarkdownMessage content={message.model === LOCAL_TOOL_MODEL ? message.content : withoutWebSources(message.content)} />
+                    {message.model !== LOCAL_TOOL_MODEL && <MarkdownMessage content={webSourcesMarkdown(message.content)} />}
                   </div> : <p>{message.content}</p>}
                   {message.role === "assistant" && message.id && localChoices[message.id] && <div className="local-choice-list" role="group" aria-label="Escolha um resultado local">
-                    <p>Selecione o caminho correto:</p>
-                    {localChoices[message.id].entries.map((entry) => <button type="button" key={entry.path} className="local-choice" onClick={() => void chooseLocalResult(message.id!, localChoices[message.id!], entry)}>
+                    <p>Selecione uma opção ou envie o caminho absoluto.</p>
+                    {localChoices[message.id].entries.map((entry) => <button type="button" key={entry.path} className="local-choice" disabled={Boolean(activeRequestId)} onClick={() => void sendMessage(undefined, undefined, { messageId: message.id!, path: entry.path })}>
                       <span>{entry.kind === "directory" ? "Pasta" : "Arquivo"}</span><code>{entry.path}</code>
                     </button>)}
                   </div>}

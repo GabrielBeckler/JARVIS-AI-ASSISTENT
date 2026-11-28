@@ -1,10 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { WebSource } from "./webSearch.js";
 
-export type LocalAction = "search" | "list_directory" | "read_file" | "open_project";
+export type LocalAction = "search" | "list_directory" | "read_file" | "open_project" | "inspect_path";
 export type LocalIntent = { action: LocalAction; fileName?: string; projectName?: string; searchRoot?: string; clarification?: string };
 export type LocalEntry = { path: string; kind: "file" | "directory" };
-export type LocalToolResult = { action: LocalAction; status: "success" | "ambiguous" | "error" | "not_found"; message: string; results: LocalEntry[]; path: string | null; content: string | null; truncated: boolean };
+export type LocalToolResult = { action: LocalAction; status: "success" | "ambiguous" | "error" | "not_found" | "clarification"; message: string; results: LocalEntry[]; path: string | null; content: string | null; truncated: boolean };
 
 export type OllamaErrorKind = "configuration" | "connection" | "timeout" | "model_not_found" | "http" | "invalid_response" | "empty_response" | "channel_closed" | "cancelled" | "web_search";
 export type OllamaError = { kind: OllamaErrorKind; message: string; status: number | null };

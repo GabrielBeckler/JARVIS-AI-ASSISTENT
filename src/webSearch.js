@@ -1,3 +1,5 @@
+import { LOCAL_TOOL_MODEL, localRequestFor } from "./localTools.js";
+
 const assistantName = /^(?:(?:ei|hey|oi)[,\s]+)?(?:aurion|jota|j)[,\s:]+/i;
 const webCommand = /^(?:pesquise|busque|procure|consulte)(?:\s+|$)(?:(?:na\s+(?:internet|web)|online)(?:[,\s:]+|$))?(?:sobre(?:\s+|$))?(?=\S|$)/i;
 const explicitWeb = /\b(?:na internet|na web|online|fontes oficiais|com fontes|com referencias)\b/i;
@@ -35,7 +37,7 @@ function previousWebTopic(messages) {
   for (let index = completed.length - 1; index > 0; index -= 2) {
     const answer = completed[index];
     const question = completed[index - 1];
-    if (answer.role !== "assistant" || !webSourcesMarkdown(answer.content) || question.role !== "user") break;
+    if (answer.role !== "assistant" || answer.model === LOCAL_TOOL_MODEL || question.model === LOCAL_TOOL_MODEL || !webSourcesMarkdown(answer.content) || question.role !== "user") break;
     const text = cleanQuestion(question.content);
     const query = explicitQuery(text) ?? text;
     if (query && !followUp.test(normalize(query))) return query;
@@ -45,11 +47,11 @@ function previousWebTopic(messages) {
 
 /**
  * @param {string} message
- * @param {{systemQuestion?: boolean, history?: readonly {role: string, content: string, delivery?: string}[]}} [options]
+ * @param {{systemQuestion?: boolean, history?: readonly {role: string, content: string, delivery?: string, model?: string}[]}} [options]
  */
 export function searchQueryFor(message, { systemQuestion = false, history = [] } = {}) {
   const text = cleanQuestion(message);
-  if (!text || text.length > 500 || /[\r\n]/.test(text) || credential.test(text)) return undefined;
+  if (!text || text.length > 500 || /[\r\n]/.test(text) || credential.test(text) || localRequestFor(text)) return undefined;
   const query = normalize(text);
   if (offlineOnly.test(query)) return undefined;
   const explicit = explicitQuery(text);

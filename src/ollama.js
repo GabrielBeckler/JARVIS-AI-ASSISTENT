@@ -1,4 +1,5 @@
 import { withoutWebSources } from "./webSearch.js";
+import { LOCAL_TOOL_MODEL } from "./localTools.js";
 
 /** @typedef {{ role: "system" | "user" | "assistant", content: string }} OllamaMessage */
 /** @typedef {OllamaMessage & { id?: string, model?: string, createdAt?: number, requestId?: string, delivery?: "pending" | "sent" | "failed", metrics?: {firstContentMs: number|null, totalElapsedMs: number|null, ollamaTotalMs: number|null, tokensPerSecond: number|null} }} StoredMessage */
@@ -31,8 +32,10 @@ export function isModelInstalled(models, requestedModel) {
 
 /** @param {readonly StoredMessage[]} messages @returns {OllamaMessage[]} */
 export function toChatContext(messages) {
+  const localRequests = new Set(messages.filter((message) => message.model === LOCAL_TOOL_MODEL).map((message) => message.requestId).filter(Boolean));
   return messages
-    .filter((message) => message.delivery !== "failed" && message.delivery !== "pending")
+    .filter((message) => message.delivery !== "failed" && message.delivery !== "pending"
+      && message.model !== LOCAL_TOOL_MODEL && !localRequests.has(message.requestId))
     .map(({ role, content }) => ({ role, content: role === "assistant" ? withoutWebSources(content) : content }));
 }
 
