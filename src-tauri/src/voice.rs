@@ -190,7 +190,7 @@ pub fn voice_control(state: State<'_, VoiceState>, id: u32, cancel: bool) {
     }
 }
 
-fn voice_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn voice_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("AURION_VOICE_DIR") {
         return Ok(PathBuf::from(dir));
     }
@@ -223,6 +223,24 @@ fn model_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+pub(crate) fn whisper_setup(dir: &Path) -> Result<(OsString, PathBuf), String> {
+    let model_name = if dir.join("ggml-small.bin").is_file() {
+        "ggml-small.bin"
+    } else {
+        "ggml-base.bin"
+    };
+    let model = model_file(dir, model_name)?;
+    let whisper = local_tool(dir, "whisper/bin/whisper-cli", "whisper-cli");
+    if whisper == "whisper-cli"
+        && !std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|path| path.join(&whisper).is_file())
+        })
+    {
+        return Err("whisper-cli não encontrado. Consulte a instalação de voz no README.".into());
+    }
+    Ok((whisper, model))
+}
+
 fn write_wav(pcm: &[u8], mut wav: impl Write) -> io::Result<()> {
     let length = pcm.len() as u32;
     wav.write_all(b"RIFF")?;
@@ -246,20 +264,7 @@ fn capture(
     recorder: &OsStr,
     mut stage: impl FnMut(&'static str),
 ) -> Result<String, String> {
-    let model_name = if dir.join("ggml-small.bin").is_file() {
-        "ggml-small.bin"
-    } else {
-        "ggml-base.bin"
-    };
-    let model = model_file(dir, model_name)?;
-    let whisper = local_tool(dir, "whisper/bin/whisper-cli", "whisper-cli");
-    if whisper == "whisper-cli"
-        && !std::env::var_os("PATH").is_some_and(|paths| {
-            std::env::split_paths(&paths).any(|path| path.join(&whisper).is_file())
-        })
-    {
-        return Err("whisper-cli não encontrado. Consulte a instalação de voz no README.".into());
-    }
+    let (whisper, model) = whisper_setup(dir)?;
     let temp =
         tempfile::tempdir().map_err(|_| "Não foi possível preparar a gravação temporária.")?;
     let pcm_path = temp.path().join("capture.pcm");
@@ -310,7 +315,7 @@ fn capture(
     let mut command = Command::new(whisper);
     command
         .arg("-m")
-        .arg(model)
+        .arg(&model)
         .arg("-f")
         .arg(audio)
         .args(["-l", "pt", "-nt", "-otxt", "--no-gpu", "-of"])
@@ -319,7 +324,7 @@ fn capture(
     job.spawn(&mut command, "whisper-cli")?;
     job.wait(
         Duration::from_secs(180),
-        &format!("O Whisper não conseguiu transcrever. Confira o modelo multilíngue {model_name}."),
+        &format!("O Whisper não conseguiu transcrever. Confira o modelo multilíngue {}.", model.display()),
         None,
     )?;
     let text = fs::read_to_string(output.with_extension("txt"))
@@ -407,7 +412,11 @@ pub async fn voice_capture(
 ) -> Result<String, String> {
     let dir = voice_dir(&app);
     let job = state.start(id)?;
+    #[cfg(target_os = "linux")]
+    let hold = crate::wake::hold_audio(&app);
     let result = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        let _hold = hold;
         capture(&job, &dir?, OsStr::new("pw-record"), |stage| {
             let _ = on_stage.send(stage.into());
         })
@@ -429,7 +438,11 @@ pub async fn voice_speak(
 ) -> Result<(), String> {
     let dir = voice_dir(&app);
     let job = state.start(id)?;
+    #[cfg(target_os = "linux")]
+    let hold = crate::wake::hold_audio(&app);
     let result = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        let _hold = hold;
         speak(&job, &dir?, OsStr::new("pw-play"), &text, volume, voice.as_deref().unwrap_or("faber"), |stage| {
             let _ = on_stage.send(stage.into());
         })

@@ -3,6 +3,8 @@ mod local_tools;
 mod ollama;
 mod system_metrics;
 mod voice;
+#[cfg(target_os = "linux")]
+mod wake;
 mod web_search;
 
 use serde::Serialize;
@@ -181,12 +183,48 @@ mod export_tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "linux")]
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if !args.iter().any(|arg| arg == wake::BACKGROUND_ARG) {
+                wake::show_window(app);
+            }
+        }))
+        .manage(wake::WakeState::default())
+        .setup(|app| {
+            wake::setup(app.handle());
+            Ok(())
+        });
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.setup(|app| {
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("main") {
+            window.show()?;
+        }
+        Ok(())
+    });
+
+    builder
         .manage(voice::VoiceState::default())
         .on_window_event(|window, event| {
             use tauri::Manager;
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
-                window.state::<voice::VoiceState>().shutdown();
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                #[cfg(target_os = "linux")]
+                tauri::WindowEvent::CloseRequested { api, .. } if wake::close_to_tray(window.app_handle()) => {
+                    if window.hide().is_ok() {
+                        api.prevent_close();
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    #[cfg(target_os = "linux")]
+                    wake::shutdown(window.app_handle());
+                    window.state::<voice::VoiceState>().shutdown();
+                }
+                _ => {}
             }
         })
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -206,7 +244,15 @@ pub fn run() {
             voice::voice_reserve,
             voice::voice_capture,
             voice::voice_speak,
-            voice::voice_control
+            voice::voice_control,
+            #[cfg(target_os = "linux")]
+            wake::wake_status,
+            #[cfg(target_os = "linux")]
+            wake::wake_configure,
+            #[cfg(target_os = "linux")]
+            wake::wake_autostart,
+            #[cfg(target_os = "linux")]
+            wake::wake_acknowledge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

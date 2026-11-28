@@ -7,6 +7,7 @@ import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
 import { ThemedSelect } from "./ThemedSelect";
 import { useLocalVoice } from "./useLocalVoice";
+import { acknowledgeWakeTranscript, useWakeWord } from "./useWakeWord";
 import { appendWebSources, searchQueryFor, webSourcesMarkdown, withoutWebSources } from "./webSearch.js";
 import { MarkdownMessage } from "./MarkdownMessage.js";
 import { LocalToolMessage } from "./LocalToolMessage.js";
@@ -148,14 +149,37 @@ function App() {
   const draftSendsWebQuery = !localRequestFor(draft) && Boolean(searchQueryFor(draft, {
     systemQuestion: isSystemQuestion(draft, toChatContext(active.messages)), history: active.messages,
   }));
-  const voice = useLocalVoice(active.id, (id, text) => {
+  const acceptDictation = useCallback((id: string, text: string) => {
     dictatedDrafts.current.add(id);
     setDraftsByConversation((drafts) => {
       const previous = getConversationDraft(drafts, id).trimEnd();
       return setConversationDraft(drafts, id, previous ? `${previous}\n${text}` : text);
     });
     textarea.current?.focus({ preventScroll: true });
-  });
+  }, []);
+  const voice = useLocalVoice(active.id, acceptDictation);
+  const wake = useWakeWord();
+  const wakeConversation = useRef<string | null>(null);
+  const acknowledgedWake = useRef(0);
+  useEffect(() => {
+    const snapshot = wake.snapshot;
+    if (!snapshot || chatStoreStatus === "checking") return;
+    if (["capturing", "awaiting_request", "transcribing"].includes(snapshot.stage)) {
+      wakeConversation.current ??= active.id;
+    }
+    const pending = snapshot.transcripts.filter((transcript) => transcript.id > acknowledgedWake.current);
+    if (pending.length) {
+      const target = wakeConversation.current ?? active.id;
+      const id = conversations.some((conversation) => conversation.id === target) ? target : active.id;
+      acceptDictation(id, pending.map((transcript) => transcript.text).join("\n"));
+      const newest = pending[pending.length - 1].id;
+      acknowledgedWake.current = newest;
+      void acknowledgeWakeTranscript(newest).catch(() => undefined);
+    }
+    if (!["capturing", "awaiting_request", "transcribing"].includes(snapshot.stage)) {
+      wakeConversation.current = null;
+    }
+  }, [wake.snapshot, chatStoreStatus, active.id, conversations, acceptDictation]);
   const voiceStage = voice.state.stage;
   const voiceBusy = voiceStage !== "idle" && voiceStage !== "error";
   const voiceNote = voice.state.stage === "error" ? voice.state.error : ({
@@ -1124,6 +1148,15 @@ function App() {
               </div>
               {voice.state.stage === "error" ? <p className="voice-feedback voice-error" role="alert">{voiceNote}</p> :
                 <div className="voice-feedback" role="status">{voiceNote || (draft.trim() && dictatedDrafts.current.has(active.id) ? "Revise a transcrição e envie para ouvir a resposta." : "")}</div>}
+              {wake.snapshot && <div className="wake-bar">
+                <button type="button" disabled={wake.updating} aria-pressed={wake.snapshot.enabled}
+                  onClick={() => void wake.configure({ enabled: !wake.snapshot?.enabled })}>
+                  {wake.snapshot.enabled ? "Pausar escuta por Jota" : "Ativar escuta por Jota"}
+                </button>
+                <span role={wake.snapshot.stage === "error" || wake.error ? "alert" : "status"}>{wake.error || wake.label}</span>
+                {wake.snapshot.enabled && wake.snapshot.stage === "error" && <button type="button" disabled={wake.updating}
+                  onClick={() => void wake.configure({ enabled: true })}>Tentar de novo</button>}
+              </div>}
             </form>
             <p className="privacy-note"><span className="lock-icon">⌑</span> {draftSendsWebQuery ? "A consulta será enviada a um buscador. A resposta é gerada no computador." : "As conversas são processadas localmente no seu computador."}</p>
           </div>
@@ -1180,7 +1213,17 @@ function App() {
                 { value: "10m", label: "10 minutos" },
               ]}
             />
-          </div><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div><div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
+          </div><p className="keep-alive-note">Manter carregado acelera próximas chamadas, mas reserva memória para os pesos do modelo e o contexto. O custo depende do modelo e de quanto dele cabe na GPU.</p><button className="outline-action" onClick={() => void checkOllama()}>Verificar serviço e modelo</button></div>
+            {wake.snapshot && <fieldset className="ai-card wake-settings">
+              <legend className="section-label">Escuta por Jota</legend>
+              <label><input type="checkbox" checked={wake.snapshot.closeToTray} disabled={wake.updating || !wake.snapshot.trayAvailable}
+                onChange={(event) => void wake.configure({ closeToTray: event.currentTarget.checked })} /> Manter o J na bandeja ao fechar a janela</label>
+              <label><input type="checkbox" checked={wake.snapshot.autostart} disabled={wake.updating || !wake.snapshot.trayAvailable}
+                onChange={(event) => void wake.autostart(event.currentTarget.checked)} /> Iniciar o J na bandeja após o login</label>
+              {!wake.snapshot.trayAvailable && <p className="keep-alive-note">A bandeja do sistema não está disponível nesta sessão.</p>}
+              <p className="keep-alive-note">O microfone segue o controle de escuta do chat. No login, o J mantém a última escolha.</p>
+            </fieldset>}
+            <div className="dashboard-note"><span className="note-icon">i</span><p>O histórico salvo é preservado. O envio inclui instruções de sistema e os turnos completos mais recentes até um orçamento aproximado de 10 mil caracteres. Caractere não equivale a token e o contexto varia por modelo; uma instrução ou pergunta muito longa pode exceder o orçamento. Respostas nunca são cortadas.</p></div></div>}
           {panel === "project" && <div className="dashboard-content project-empty" tabIndex={0} aria-label="Projetos"><div className="project-empty-icon"><Icon name="folder" size={22} /></div><h3>Nenhum projeto selecionado</h3><p>O cadastro e o vínculo de projetos ainda estão indisponíveis.</p></div>}
         </div>
       </aside>

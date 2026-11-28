@@ -279,6 +279,36 @@ Na leitura, o Aurion usa o texto dos títulos, listas e links, omite emojis e an
 
 O controle **Volume da voz do Aurion** é salvo neste dispositivo e vale a partir da próxima reprodução ou do próximo trecho. Em 100%, o Aurion reproduz o sinal original. Ele não amplifica o sinal nem altera a saída padrão do Fedora. Se o volume estiver baixo em 100%, confira o fluxo **Aurion** e o dispositivo de saída no painel de som enquanto a voz está tocando.
 
+### Chamar o J por “Jota” no Fedora
+
+A escuta por nome começa pausada. Instale o Whisper como descrito acima e adicione o detector no mesmo diretório de voz. Os comandos abaixo usam Python, curl e unzip e podem ser executados com a conta do usuário.
+
+```bash
+voice_dir="${AURION_VOICE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/br.com.jarvis.ai/voice}"
+wake_dir="$voice_dir/wake"
+mkdir -p "$wake_dir"
+python3 -m venv "$wake_dir/venv"
+"$wake_dir/venv/bin/python" -m pip install 'vosk==0.3.45'
+curl -fL --retry 2 -o "$wake_dir/vosk-model-small-pt-0.3.zip" \
+  https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip
+unzip -n "$wake_dir/vosk-model-small-pt-0.3.zip" -d "$wake_dir"
+```
+
+No chat, selecione **Ativar escuta por Jota**. Quando o indicador mostrar **Aguardando “Jota”**, diga “Oi, Jota, como está meu computador?” de uma vez. Se disser só “Jota”, aguarde o aviso **Estou ouvindo. Pode falar.** e faça o pedido. Revise o texto antes de enviar. O envio usa as mesmas ferramentas do chat e lê a resposta com a voz selecionada. O microfone manual e a reprodução da voz suspendem temporariamente a escuta pelo nome.
+
+Em **Dashboard → IA → Escuta por Jota**, é possível manter o J na bandeja ao fechar a janela ou iniciar o J na bandeja após o login. O login preserva a escolha entre escutar e ficar pausado. Use o menu da bandeja para abrir o J, pausar ou retomar a escuta, ou encerrar o processo. Para o login, prefira o aplicativo instalado em um caminho permanente. A sessão do KDE controla se a janela que reapareceu também recebe foco.
+
+O [Vosk](https://github.com/alphacep/vosk-api/blob/master/COPYING) e o [modelo português de 31 MB](https://alphacephei.com/vosk/models) usam Apache 2.0 e funcionam offline depois de instalados. O J verifica se “jota” está no vocabulário e configura uma gramática curta com saudações, alternativas e sons desconhecidos. A detecção usa o áudio e mantém até 3,2 segundos em memória para preservar o começo da frase. O Whisper transcreve em português depois do chamado e do fim da fala. Somente o áudio da fala ativada usa um WAV temporário, removido após a transcrição ou o cancelamento. A captura de fundo não depende do Ollama nem usa VRAM.
+
+Ruído, sotaques e conversas que começam com um nome parecido podem afetar a detecção. Se o PipeWire perder áudio, o indicador mostra o erro e a escuta tenta reconectar ao microfone padrão. O modelo não identifica quem falou.
+
+Para rodar os testes da captura simulada e das pronúncias sintéticas, instale também eSpeak NG e FFmpeg e execute na raiz do projeto:
+
+```bash
+JOTA_TEST_MODEL="$wake_dir/vosk-model-small-pt-0.3" PYTHONDONTWRITEBYTECODE=1 \
+  "$wake_dir/venv/bin/python" -m unittest discover -s tests -p test_wake_worker.py -v
+```
+
 ### Testar a entrada de áudio
 
 Se a transcrição chegar com palavras trocadas ou faltando, grave a mesma frase fora do Aurion e ouça a entrada padrão do Fedora. O teste grava oito segundos. Conte um segundo antes de falar e deixe uma pausa depois da última palavra.
