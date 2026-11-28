@@ -1,4 +1,5 @@
 mod chat_store;
+mod local_tools;
 mod ollama;
 mod system_metrics;
 mod voice;
@@ -36,6 +37,13 @@ async fn ollama_list_models(
     base_url: String,
 ) -> Result<Vec<ollama::OllamaModel>, ollama::OllamaError> {
     ollama::list_models(&base_url).await
+}
+
+#[tauri::command]
+async fn local_tool_execute(request: local_tools::LocalToolRequest) -> Result<local_tools::LocalToolResult, String> {
+    tauri::async_runtime::spawn_blocking(move || local_tools::execute(request))
+        .await
+        .map_err(|error| format!("Falha ao executar ferramenta local: {error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -191,6 +199,7 @@ pub fn run() {
             chat_store::save_chat_store,
             system_metrics::system_snapshot,
             ollama_list_models,
+            local_tool_execute,
             ollama_chat,
             ollama_cancel_chat,
             export_markdown_dialog,

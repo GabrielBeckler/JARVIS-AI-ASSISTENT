@@ -1,7 +1,8 @@
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
 import { createLocalChatInstructions, isModelInstalled, limitChatContext, resolveChatThinking, toChatContext, type StoredMessage } from "./ollama.js";
-import { cancelOllamaChat, listOllamaModels, normalizeOllamaError, streamOllamaChat } from "./ollamaService";
+import { cancelOllamaChat, executeLocalTool, listOllamaModels, normalizeOllamaError, streamOllamaChat, type LocalAction, type LocalEntry } from "./ollamaService";
+import { localActionFor, localResultText } from "./localTools.js";
 import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
 import { ThemedSelect } from "./ThemedSelect";
@@ -28,9 +29,10 @@ type Panel = "system" | "ai" | "project";
 type ServiceStatus = "checking" | "available" | "unavailable";
 type ModelStatus = "checking" | "missing" | "ready" | "unknown";
 type ChatStoreStatus = "checking" | "ready" | "failed";
-type StreamState = { webSearch: boolean; requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
+type StreamState = { webSearch: boolean; localStatus?: string; requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
 type CopyFeedback = { label: string; failed: boolean };
 type RenameDialogState = { conversationId: string; value: string };
+type LocalChoice = { action: LocalAction; query: string; entries: LocalEntry[] };
 
 function durationLabel(milliseconds: number | null | undefined): string {
   return milliseconds == null || !Number.isFinite(milliseconds) ? "N/D" : `${(milliseconds / 1000).toFixed(1)} s`;
@@ -115,6 +117,7 @@ function App() {
   const modelRef = useRef(model);
   const [activeRequests, setActiveRequests] = useState<Record<string, string>>({});
   const [streamingByConversation, setStreamingByConversation] = useState<Record<string, StreamState>>({});
+  const [localChoices, setLocalChoices] = useState<Record<string, LocalChoice>>({});
   const [errorsByConversation, setErrorsByConversation] = useState<Record<string, string>>({});
   const [copyFeedbackByKey, setCopyFeedbackByKey] = useState<Record<string, CopyFeedback>>({});
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
@@ -615,7 +618,8 @@ function App() {
     const searchHistory = retrying
       ? conversation.messages.slice(0, conversation.messages.indexOf(retrying))
       : conversation.messages;
-    const webQuery = searchQueryFor(content, { systemQuestion, history: searchHistory });
+    const localIntent = localActionFor(content);
+    const webQuery = localIntent ? undefined : searchQueryFor(content, { systemQuestion, history: searchHistory });
     const needsSystemContext = !webQuery && systemQuestion;
     const now = Date.now();
     const startedAt = performance.now();
@@ -636,7 +640,7 @@ function App() {
 
     statusCheckRef.current += 1;
     setRequestState(conversationId, requestId);
-    setStreamingByConversation((items) => ({ ...items, [conversationId]: { webSearch: Boolean(webQuery), requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
+    setStreamingByConversation((items) => ({ ...items, [conversationId]: { webSearch: Boolean(webQuery), localStatus: localIntent ? localIntent.action === "open_project" ? "Abrindo projeto" : localIntent.action === "read_file" ? "Lendo arquivo" : localIntent.action === "list_directory" ? "Listando arquivos" : "Procurando arquivos" : undefined, requestId, content: "", model: requestedModel, createdAt: now, startedAt, firstContentMs: null } }));
     setErrorsByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
     if (!retrying) setDraftsByConversation((drafts) => setConversationDraft(drafts, conversationId, ""));
     setConversations((items) => (items.length ? items : [conversation]).map((item) => {
@@ -653,6 +657,22 @@ function App() {
     }));
 
     try {
+      if (localIntent) {
+        const result = await executeLocalTool(localIntent.action, localIntent.query);
+        if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+        const assistantMessageId = crypto.randomUUID();
+        const nowDone = Date.now();
+        setConversations((items) => {
+          const sent = updateMessage(items, conversationId, userMessage.id!, { delivery: "sent" });
+          return appendAssistantOnce(sent, conversationId, requestId, {
+            id: assistantMessageId, role: "assistant", content: localResultText(result), model: "ferramenta local",
+            createdAt: nowDone, requestId, delivery: "sent",
+          }).map((item) => item.id === conversationId ? { ...item, updatedAt: nowDone } : item);
+        });
+        if (result.status === "ambiguous") setLocalChoices((choices) => ({ ...choices, [assistantMessageId]: { action: localIntent.action, query: localIntent.query, entries: result.results } }));
+        if (readAnswer) voice.stopReply(requestId);
+        return;
+      }
       let systemContext = "";
       if (needsSystemContext) {
         try {
@@ -750,6 +770,35 @@ function App() {
         setRequestState(conversationId, null);
         setStreamingByConversation((items) => { const next = { ...items }; delete next[conversationId]; return next; });
         firstContentVisibleRef.current.delete(requestId);
+      }
+    }
+  };
+
+  const chooseLocalResult = async (messageId: string, choice: LocalChoice, selected: LocalEntry) => {
+    const conversation = conversations.find((item) => item.id === activeId);
+    if (!conversation || activeRequestsRef.current.has(conversation.id)) return;
+    const requestId = crypto.randomUUID();
+    const now = Date.now();
+    const startedAt = performance.now();
+    setLocalChoices((items) => { const next = { ...items }; delete next[messageId]; return next; });
+    setRequestState(conversation.id, requestId);
+    setStreamingByConversation((items) => ({ ...items, [conversation.id]: { webSearch: false, localStatus: choice.action === "open_project" ? "Abrindo projeto" : choice.action === "read_file" ? "Lendo arquivo" : "Listando arquivos", requestId, content: "", model: "ferramenta local", createdAt: now, startedAt, firstContentMs: null } }));
+    try {
+      const result = await executeLocalTool(choice.action, choice.query, selected.path);
+      if (!isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) return;
+      const doneAt = Date.now();
+      setConversations((items) => appendAssistantOnce(items, conversation.id, requestId, {
+        id: crypto.randomUUID(), role: "assistant", content: localResultText(result), model: "ferramenta local", createdAt: doneAt, requestId, delivery: "sent",
+      }).map((item) => item.id === conversation.id ? { ...item, updatedAt: doneAt } : item));
+    } catch (error) {
+      if (!isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) return;
+      setConversations((items) => appendAssistantOnce(items, conversation.id, requestId, {
+        id: crypto.randomUUID(), role: "assistant", content: `Falha na ferramenta local: ${String(error)}`, model: "ferramenta local", createdAt: Date.now(), requestId, delivery: "sent",
+      }));
+    } finally {
+      if (isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) {
+        setRequestState(conversation.id, null);
+        setStreamingByConversation((items) => { const next = { ...items }; delete next[conversation.id]; return next; });
       }
     }
   };
@@ -946,6 +995,12 @@ function App() {
                     <MarkdownMessage content={withoutWebSources(message.content)} />
                     <MarkdownMessage content={webSourcesMarkdown(message.content)} />
                   </div> : <p>{message.content}</p>}
+                  {message.role === "assistant" && message.id && localChoices[message.id] && <div className="local-choice-list" role="group" aria-label="Escolha um resultado local">
+                    <p>Selecione o caminho correto:</p>
+                    {localChoices[message.id].entries.map((entry) => <button type="button" key={entry.path} className="local-choice" onClick={() => void chooseLocalResult(message.id!, localChoices[message.id!], entry)}>
+                      <span>{entry.kind === "directory" ? "Pasta" : "Arquivo"}</span><code>{entry.path}</code>
+                    </button>)}
+                  </div>}
                   {message.role === "assistant" && <div className="message-actions">
                     <button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(message.requestId ?? message.id ?? `${active.id}-${index}`, message.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>
                     {message.delivery !== "failed" && message.content.trim() && <button type="button" className="copy-response" disabled={voiceBusy} onClick={() => voice.speak(withoutWebSources(message.content))}><Icon name="speaker" size={15} /> Ouvir resposta</button>}
@@ -956,7 +1011,7 @@ function App() {
                   {message.role === "user" && message.delivery === "failed" && <button className="retry-message" onClick={() => void sendMessage(undefined, message.id)} disabled={Boolean(activeRequestId)}>Tentar novamente</button>}
                 </div>
               </article>)}
-              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">J</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : activeStream.webSearch ? <p role="status">Buscando fontes e preparando a resposta…</p> : <div className="typing-indicator"><i /><i /><i /></div>}{activeStream.content && <div className="message-actions"><button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(activeStream.requestId, activeStream.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>{copyFeedbackByKey[activeStream.requestId] && <span className={`copy-feedback ${copyFeedbackByKey[activeStream.requestId].failed ? "failed" : ""}`} role={copyFeedbackByKey[activeStream.requestId].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[activeStream.requestId].label}</span>}</div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
+              {activeRequestId && activeStream?.requestId === activeRequestId && <article className="message-row assistant"><div className="message-avatar assistant"><Icon name="spark" size={15} /></div><div className="message-content"><div className="message-author"><span className="message-author-name">J</span><span>{activeStream.model} · {messageTime(activeStream.createdAt)}</span></div>{activeStream.content ? <div className="assistant-markdown"><MarkdownMessage content={activeStream.content} /></div> : activeStream.localStatus ? <p role="status">{activeStream.localStatus}…</p> : activeStream.webSearch ? <p role="status">Buscando fontes e preparando a resposta…</p> : <div className="typing-indicator"><i /><i /><i /></div>}{activeStream.content && <div className="message-actions"><button type="button" className="copy-response" aria-label="Copiar resposta" title="Copiar resposta" onClick={() => void copyResponse(activeStream.requestId, activeStream.content)}><Icon name="copy" size={14} /><span>Copiar resposta</span></button>{copyFeedbackByKey[activeStream.requestId] && <span className={`copy-feedback ${copyFeedbackByKey[activeStream.requestId].failed ? "failed" : ""}`} role={copyFeedbackByKey[activeStream.requestId].failed ? "alert" : "status"} aria-live="polite">{copyFeedbackByKey[activeStream.requestId].label}</span>}</div>}<div className="response-metrics">Primeiro texto: {activeStream.firstContentMs == null ? durationLabel(Math.max(0, clockNow - activeStream.startedAt)) + " · aguardando" : durationLabel(activeStream.firstContentMs)} · Total: {durationLabel(Math.max(0, clockNow - activeStream.startedAt))} · Velocidade: N/D</div></div></article>}
               <div className="message-end" />
             </div>
           )}

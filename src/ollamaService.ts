@@ -1,6 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { WebSource } from "./webSearch.js";
 
+export type LocalAction = "search" | "list_directory" | "read_file" | "open_project";
+export type LocalEntry = { path: string; kind: "file" | "directory" };
+export type LocalToolResult = { action: LocalAction; status: "success" | "ambiguous" | "error"; message: string; results: LocalEntry[]; path: string | null; content: string | null; truncated: boolean };
+
 export type OllamaErrorKind = "configuration" | "connection" | "timeout" | "model_not_found" | "http" | "invalid_response" | "empty_response" | "channel_closed" | "cancelled" | "web_search";
 export type OllamaError = { kind: OllamaErrorKind; message: string; status: number | null };
 export type OllamaModel = { name: string; model?: string | null };
@@ -38,6 +42,10 @@ export function listOllamaModels(baseUrl: string): Promise<OllamaModel[]> {
 
 export function cancelOllamaChat(requestId: string): Promise<boolean> {
   return invoke<boolean>("ollama_cancel_chat", { requestId });
+}
+
+export function executeLocalTool(action: LocalAction, query: string, selectedPath?: string): Promise<LocalToolResult> {
+  return invoke<LocalToolResult>("local_tool_execute", { request: { action, query, selectedPath: selectedPath ?? null } });
 }
 
 export function streamOllamaChat(
