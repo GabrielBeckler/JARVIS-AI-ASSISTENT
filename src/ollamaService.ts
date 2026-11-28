@@ -2,7 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { WebSource } from "./webSearch.js";
 
 export type LocalAction = "search" | "list_directory" | "read_file" | "open_project" | "inspect_path";
-export type LocalIntent = { action: LocalAction; fileName?: string; projectName?: string; searchRoot?: string; clarification?: string };
+export type LocalIntent = { action: LocalAction; fileName?: string; projectName?: string; searchRoot?: string; downloads?: boolean; fileFilter?: "all" | "images" | "pdf"; recursive?: boolean; clarification?: string };
 export type LocalEntry = { path: string; kind: "file" | "directory" };
 export type LocalToolResult = { action: LocalAction; status: "success" | "ambiguous" | "error" | "not_found" | "clarification"; message: string; results: LocalEntry[]; path: string | null; content: string | null; truncated: boolean };
 
@@ -34,7 +34,8 @@ export function normalizeOllamaError(error: unknown): OllamaError {
       status: typeof value.status === "number" ? value.status : null,
     };
   }
-  return { kind: "invalid_response", message: typeof error === "string" ? error : "Falha inesperada na comunicação com o Ollama.", status: null };
+  const message = typeof error === "string" ? error : error instanceof Error && error.message.trim() ? error.message : "Falha inesperada na comunicação com o Ollama.";
+  return { kind: "invalid_response", message, status: null };
 }
 
 export function listOllamaModels(baseUrl: string): Promise<OllamaModel[]> {

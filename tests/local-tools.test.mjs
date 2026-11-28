@@ -24,6 +24,29 @@ test("recognizes natural variants, preserves spelling, and supports folder searc
   assert.deepEqual(localActionFor("J, leia o arquivo Notas da Reunião.txt do projeto Ação Odontológica"), intent("read_file", "Notas da Reunião.txt", "Ação Odontológica", undefined));
 });
 
+test("routes natural Downloads listing requests and common typos to the local tool", () => {
+  const cases = [
+    "Mostre todos os arquivos da pasta Downloads.",
+    "Me apresente todos os arquivos da pasta dowload.",
+    "Liste os arquivos que baixei.",
+    "Quais imagens estão na minha pasta de downloads?",
+    "Mostre todas as imagens de download.",
+    "Liste os PDFs da pasta Downloads.",
+    "me apresente todas as imagens de dowload",
+    "me apresente ttod os arquivos da pasta dowload",
+  ];
+  for (const text of cases) {
+    assert.deepEqual(localRequestFor(text), { intent: { action: "list_directory", downloads: true, fileFilter: /imagens?/i.test(text) ? "images" : /pdf/i.test(text) ? "pdf" : "all", recursive: false } }, text);
+    assert.equal(searchQueryFor(text), undefined, `${text} não deve ir para a busca web`);
+  }
+  assert.deepEqual(localActionFor("Liste as imagens da pasta Downloads e suas subpastas."), {
+    action: "list_directory", downloads: true, fileFilter: "images", recursive: true,
+  });
+  const arbitraryFile = localRequestFor("Mostre o arquivo dowload-config.yaml");
+  assert.equal(arbitraryFile.intent.fileName, "dowload-config.yaml", "preserva o nome arbitrário do arquivo");
+  assert.equal(arbitraryFile.intent.downloads, undefined, "não o confunde com a pasta Downloads");
+});
+
 test("asks for clarification for incomplete local commands and keeps local requests off web search", () => {
   assert.match(localActionFor("Abra o projeto no VS Code.").clarification, /Qual projeto/);
   assert.match(localActionFor("Leia o arquivo.").clarification, /Qual arquivo/);

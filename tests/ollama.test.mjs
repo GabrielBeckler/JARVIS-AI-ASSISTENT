@@ -94,6 +94,22 @@ test("retries a failed prompt in place and appends one successful answer", () =>
   assert.deepEqual(toChatContext(duplicate[0].messages).map((message) => message.content), ["Oi", "Olá"]);
 });
 
+test("keeps a failed local listing in place when retried and appends its result afterward", () => {
+  const conversation = emptyConversation("downloads");
+  conversation.messages = [
+    { id: "before-q", role: "user", content: "Oi", model: "qwen3.5:4b", createdAt: 1, delivery: "sent" },
+    { id: "before-a", role: "assistant", content: "Olá", model: "qwen3.5:4b", createdAt: 2, delivery: "sent" },
+    { id: "downloads-q", role: "user", content: "me apresente ttod os arquivos da pasta dowload", model: "ferramenta local", createdAt: 3, delivery: "failed" },
+  ];
+  const retry = updateMessage([conversation], "downloads", "downloads-q", { delivery: "pending", requestId: "local-retry", createdAt: 4 });
+  const sent = updateMessage(retry, "downloads", "downloads-q", { delivery: "sent" });
+  const completed = appendAssistantOnce(sent, "downloads", "local-retry", {
+    id: "downloads-a", role: "assistant", content: "Conteúdo de /home/user/Downloads", model: "ferramenta local", createdAt: 5, delivery: "sent",
+  });
+  assert.deepEqual(completed[0].messages.map((message) => message.id), ["before-q", "before-a", "downloads-q", "downloads-a"]);
+  assert.deepEqual(toChatContext(completed[0].messages).map((message) => message.content), ["Oi", "Olá"]);
+});
+
 test("isolates two conversations and discards delayed replies after a request finishes", () => {
   const conversations = [emptyConversation("a"), emptyConversation("b")];
   const active = new Map([["a", "request-a"], ["b", "request-b"]]);

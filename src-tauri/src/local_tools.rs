@@ -33,7 +33,14 @@ pub struct LocalToolRequest {
     pub project_name: Option<String>,
     pub search_root: Option<String>,
     pub selected_path: Option<String>,
+    pub downloads: Option<bool>,
+    pub file_filter: Option<DownloadFilter>,
+    pub recursive: Option<bool>,
 }
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadFilter { All, Images, Pdf }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +101,27 @@ fn normalized(value: &str) -> String {
 
 fn home_dir() -> Result<PathBuf, String> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "Não foi possível identificar a pasta pessoal (HOME).".into())
+}
+
+fn configured_downloads_dir(home: &Path, config_home: Option<&Path>) -> PathBuf {
+    let config_home = config_home.filter(|path| path.is_absolute()).map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".config"));
+    if let Ok(contents) = fs::read_to_string(config_home.join("user-dirs.dirs")) {
+        for line in contents.lines() {
+            let Some((key, raw)) = line.split_once('=') else { continue };
+            if key.trim() != "XDG_DOWNLOAD_DIR" { continue }
+            let value = raw.trim().trim_matches('"').replace("${HOME}", &display_path(home)).replace("$HOME", &display_path(home));
+            let path = PathBuf::from(value);
+            if path.is_absolute() { return path; }
+        }
+    }
+    home.join("Downloads")
+}
+
+fn downloads_dir() -> Result<PathBuf, String> {
+    let home = home_dir()?;
+    let config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    Ok(configured_downloads_dir(&home, config_home.as_deref()))
 }
 
 fn explicit_path(text: &str) -> Result<Option<PathBuf>, String> {
@@ -495,6 +523,95 @@ fn list_directory_at(target: &Path) -> LocalToolResult {
     result.path = Some(display_path(target)); result.results = items; result.truncated = truncated; result
 }
 
+fn matches_download_filter(path: &Path, filter: DownloadFilter) -> bool {
+    match filter {
+        DownloadFilter::All => true,
+        DownloadFilter::Images => path.extension().and_then(|value| value.to_str())
+            .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg")),
+        DownloadFilter::Pdf => path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("pdf")),
+    }
+}
+
+fn path_readable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).map(|metadata| metadata.permissions().mode() & 0o444 != 0).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    { fs::metadata(path).is_ok() }
+}
+
+fn list_downloads_at(root: &Path, filter: DownloadFilter, recursive: bool) -> LocalToolResult {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return LocalToolResult::new("list_directory", "error", format!("O caminho configurado para Downloads não é uma pasta: {}", display_path(root))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LocalToolResult::new("list_directory", "error", format!("A pasta Downloads não existe: {}", display_path(root))),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return LocalToolResult::new("list_directory", "error", format!("Não foi possível acessar a pasta Downloads {}: permissão negada.", display_path(root))),
+        Err(error) => return LocalToolResult::new("list_directory", "error", format!("Não foi possível acessar a pasta Downloads {}: {error}", display_path(root))),
+    }
+    if !path_readable(root) {
+        return LocalToolResult::new("list_directory", "error", format!("Não foi possível acessar a pasta Downloads {}: permissão negada.", display_path(root)));
+    }
+    let mut pending = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut items = Vec::new();
+    let mut denied = false;
+    let mut truncated = false;
+    let mut visited = 0usize;
+    while let Some((directory, depth)) = pending.pop_front() {
+        if visited >= MAX_VISITED { truncated = true; break; }
+        visited += 1;
+        if !path_readable(&directory) { denied = true; continue; }
+        let read = match fs::read_dir(&directory) {
+            Ok(items) => items,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => { denied = true; continue; }
+            Err(error) if depth == 0 => return LocalToolResult::new("list_directory", "error", format!("Não foi possível listar Downloads em {}: {error}", display_path(root))),
+            Err(_) => continue,
+        };
+        for item in read {
+            let item = match item { Ok(item) => item, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => { denied = true; continue; }, Err(_) => continue };
+            let kind = match item.file_type() { Ok(kind) => kind, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => { denied = true; continue; }, Err(_) => continue };
+            if kind.is_symlink() { continue; }
+            let path = item.path();
+            if kind.is_dir() {
+                if filter == DownloadFilter::All {
+                    items.push(entry(&path, "directory"));
+                }
+                if recursive && depth < MAX_DEPTH {
+                    if pending.len() < MAX_VISITED { pending.push_back((path.clone(), depth + 1)); } else { truncated = true; }
+                }
+            } else if kind.is_file() && matches_download_filter(&path, filter) {
+                items.push(entry(&path, "file"));
+            }
+            if items.len() > MAX_LISTING { truncated = true; break; }
+        }
+        if truncated { break; }
+    }
+    items.sort_by(|a, b| {
+        let depth = |path: &str| Path::new(path).components().count();
+        depth(&a.path).cmp(&depth(&b.path)).then_with(|| normalized(&a.path).cmp(&normalized(&b.path)))
+    });
+    items.truncate(MAX_LISTING);
+    let filter_name = match filter { DownloadFilter::All => "arquivos", DownloadFilter::Images => "imagens", DownloadFilter::Pdf => "PDFs" };
+    let scope = if recursive { "incluindo subpastas" } else { "somente na pasta" };
+    let mut message = if items.is_empty() {
+        format!("Não encontrei {filter_name} em {} ({scope}).", display_path(root))
+    } else {
+        format!("Conteúdo de {} ({}, {} item(ns) mostrado(s)){}:", display_path(root), scope, items.len(), if truncated { "; lista limitada a 100 itens" } else { "" })
+    };
+    if denied { message.push_str(" Alguns itens foram omitidos por permissão negada."); }
+    let mut result = LocalToolResult::new("list_directory", "success", message);
+    result.path = Some(display_path(root));
+    result.results = items;
+    result.truncated = truncated;
+    result
+}
+
+fn list_downloads(request: &LocalToolRequest) -> LocalToolResult {
+    let root = match downloads_dir() { Ok(path) => path, Err(error) => return LocalToolResult::new("list_directory", "error", error) };
+    list_downloads_at(&root, request.file_filter.unwrap_or(DownloadFilter::All), request.recursive.unwrap_or(false))
+}
+
 fn read_file_at(path: &Path) -> LocalToolResult {
     let mut bytes = Vec::new();
     if let Err(error) = fs::File::open(path).and_then(|file| {
@@ -587,6 +704,7 @@ fn find_single_project(
 }
 
 fn list_directory(request: &LocalToolRequest) -> LocalToolResult {
+    if request.downloads.unwrap_or(false) { return list_downloads(request); }
     let selected = match selected_path(request) { Ok(path) => path, Err(error) => return LocalToolResult::new("list_directory", "error", error) };
     let target = if let Some(path) = selected { path } else {
         let root = match resolve_search_root(request) { Ok(path) => path, Err(error) => return LocalToolResult::new("list_directory", "error", error) };
@@ -720,7 +838,63 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     fn request(action: LocalAction, file: Option<&str>, project: Option<&str>, root: Option<&Path>, selected: Option<&Path>) -> LocalToolRequest {
-        LocalToolRequest { action, file_name: file.map(str::to_owned), project_name: project.map(str::to_owned), search_root: root.map(|path| path.to_string_lossy().into_owned()), selected_path: selected.map(|path| path.to_string_lossy().into_owned()) }
+        LocalToolRequest { action, file_name: file.map(str::to_owned), project_name: project.map(str::to_owned), search_root: root.map(|path| path.to_string_lossy().into_owned()), selected_path: selected.map(|path| path.to_string_lossy().into_owned()), downloads: None, file_filter: None, recursive: None }
+    }
+
+    #[test]
+    fn resolves_xdg_download_folder_and_falls_back_only_when_unconfigured() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config"); fs::create_dir(&config).unwrap();
+        fs::write(config.join("user-dirs.dirs"), "XDG_DOWNLOAD_DIR=\"$HOME/Transferências\"\n").unwrap();
+        assert_eq!(configured_downloads_dir(home.path(), Some(&config)), home.path().join("Transferências"));
+        fs::write(config.join("user-dirs.dirs"), "XDG_DOCUMENTS_DIR=\"$HOME/Documentos\"\n").unwrap();
+        assert_eq!(configured_downloads_dir(home.path(), Some(&config)), home.path().join("Downloads"));
+        assert_eq!(configured_downloads_dir(home.path(), None), home.path().join("Downloads"));
+    }
+
+    #[test]
+    fn lists_download_files_with_case_insensitive_filters_and_optional_subfolders() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("café.PNG"), "png").unwrap();
+        fs::write(root.path().join("foto.JpG"), "jpg").unwrap();
+        fs::write(root.path().join("foto.jpeg"), "jpeg").unwrap();
+        fs::write(root.path().join("ícone.SVG"), "svg").unwrap();
+        fs::write(root.path().join("animação.GIF"), "gif").unwrap();
+        fs::write(root.path().join("paisagem.webp"), "webp").unwrap();
+        fs::write(root.path().join("relatório.PDF"), "pdf").unwrap();
+        fs::write(root.path().join("notas.txt"), "texto").unwrap();
+        let nested = root.path().join("sub pasta"); fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("dentro.jpg"), "nested").unwrap();
+        let images = list_downloads_at(root.path(), DownloadFilter::Images, false);
+        assert_eq!(images.results.len(), 6);
+        assert!(images.results.iter().all(|item| [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"].iter().any(|ext| item.path.to_lowercase().ends_with(ext))));
+        assert!(images.results.iter().all(|item| !item.path.contains("sub pasta")));
+        let pdf = list_downloads_at(root.path(), DownloadFilter::Pdf, false);
+        assert_eq!(pdf.results.len(), 1); assert!(pdf.results[0].path.ends_with("relatório.PDF"));
+        let all = list_downloads_at(root.path(), DownloadFilter::All, false);
+        assert_eq!(all.results.len(), 9); assert!(all.results.iter().any(|item| item.kind == "directory"));
+        let recursive = list_downloads_at(root.path(), DownloadFilter::Images, true);
+        assert_eq!(recursive.results.len(), 7); assert!(recursive.results.iter().any(|item| item.path.ends_with("dentro.jpg")));
+    }
+
+    #[test]
+    fn download_listing_reports_empty_missing_denied_and_limit_conditions() {
+        let root = tempfile::tempdir().unwrap();
+        let empty = list_downloads_at(root.path(), DownloadFilter::Pdf, false);
+        assert_eq!(empty.status, "success"); assert!(empty.message.contains("PDFs")); assert!(empty.message.contains(&display_path(root.path())));
+        let missing = list_downloads_at(&root.path().join("inexistente"), DownloadFilter::All, false);
+        assert_eq!(missing.status, "error"); assert!(missing.message.contains("não existe"));
+        for index in 0..(MAX_LISTING + 3) { fs::write(root.path().join(format!("arquivo {index:03}.pdf")), "pdf").unwrap(); }
+        let many = list_downloads_at(root.path(), DownloadFilter::Pdf, false);
+        assert_eq!(many.results.len(), MAX_LISTING); assert!(many.truncated); assert!(many.message.contains("limitada"));
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let denied = root.path().join("negada"); fs::create_dir(&denied).unwrap();
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+            let result = list_downloads_at(&denied, DownloadFilter::All, false);
+            assert_eq!(result.status, "error"); assert!(result.message.contains("permissão negada"));
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
+        }
     }
 
     #[test]

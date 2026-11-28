@@ -78,10 +78,27 @@ export function localRequestFor(input, pendingChoice) {
   return intent ? { intent } : null;
 }
 
+function downloadsRequest(text) {
+  const lower = normalize(text);
+  const mentionsDownloads = /\b(?:pasta|diretorio)\s+(?:de\s+)?(?:downloads?|dowloads?)\b|\b(?:de|da|dos|nas?)\s+(?:downloads?|dowloads?)\b|\barquivos?\s+que\s+(?:eu\s+)?baixei\b|\bbaixados?\b/.test(lower);
+  const hasListingIntent = /\b(?:liste|listar|list|mostre|mostrar|mostra|exiba|exibir|apresente|apresentar|quais|qual|tem|existe)\b/.test(lower)
+    || /\bttod\b/.test(lower);
+  const hasItems = /\b(?:arquivos?|imagens?|fotos?|figuras?|pdfs?|documentos?)\b/.test(lower);
+  if (!(mentionsDownloads && (hasListingIntent || /\barquivos?\s+que\s+(?:eu\s+)?baixei\b/.test(lower)) && hasItems)) return null;
+
+  const filter = /\b(?:imagens?|fotos?|figuras?)\b/.test(lower)
+    ? "images"
+    : /\bpdfs?\b|\barquivos?\s+pdf\b/.test(lower) ? "pdf" : "all";
+  const recursive = /\b(?:subpastas?|subdiretorios?|subfolders?|recursiv[oa]|incluindo\s+(?:as\s+)?subpastas?|em\s+todas\s+as\s+pastas)\b/.test(lower);
+  return { action: "list_directory", downloads: true, fileFilter: filter, recursive };
+}
+
 /** Parse a local request into validated intent fields; no model-generated command is accepted. */
 export function localActionFor(input) {
   const text = input.trim().replace(prefix, "");
   const lower = normalize(text);
+  const downloads = downloadsRequest(text);
+  if (downloads) return downloads;
   const action = /\b(?:abra|abrir|abre|open)\b/i.test(lower) && /\b(?:vs\s*code|vscode|visual studio code)\b/i.test(lower)
     ? "open_project"
     : /\b(?:liste|listar|mostre|mostra)\b/i.test(lower) && /\b(?:arquivos|conteudo|itens|pasta|diretorio)\b/i.test(lower)
