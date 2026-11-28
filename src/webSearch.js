@@ -5,6 +5,7 @@ const offlineOnly = /\b(?:sem\s+(?:(?:usar|consultar|buscar|pesquisar)\s+(?:(?:n
 const factualQuestion = /\b(?:o que (?:e|sao|significa|aconteceu)|que (?:dia|ano)|quem|quando|onde|qual|quais|quanto|quantos|como (?:esta|ficou|funciona|instalar|configurar)|por que|me (?:fale|conte|diga) sobre)\b/i;
 const researchTopic = /\b(?:lancamentos?|lancou|estreia|pre-venda|noticias?|resultados?|cotacao|preco|previsao|ultim[ao]s?|mais recente|atualizac(?:ao|oes)|disponibilidade|ja saiu|ja esta disponivel|melhor(?:es)?|comprar|compativel|compatibilidade|suporta|requisitos|documentacao)\b/i;
 const localRequest = /\b(?:meu|minha|neste|nesta|aqui no|aqui na)\s+(?:computador|pc|notebook|sistema|fedora|linux|processador|cpu|gpu|ram|vram|memoria|arquivo|projeto|conversa|conta|documento)\b/i;
+const localFileCommand = /\b(?:encontre|encontrar|procure|procurar|busque|buscar|localize|localizar|leia|ler|abra|abrir|liste|listar|onde\s+(?:esta|fica))\b.*\b(?:arquivo|pasta|diretorio|projeto|readme|[\p{L}\p{N}_-]+\.[\p{L}\p{N}]{1,10})\b/iu;
 const localWork = /^(?:traduza|reescreva|revise|formate|resuma|crie|escreva|invente|corrija|calcule|explique (?:a frase|o trecho|o texto|o erro abaixo)|analise (?:o texto|o trecho|os dados|os resultados que)|me ajude a (?:escrever|criar)|(?:faca|monte) (?:uma? )?(?:redacao|mensagem|historia|poema|lista|plano))\b/i;
 const basicQuestion = /^(?:(?:oi|ola|bom dia|boa tarde|boa noite|obrigad[oa]|valeu)[!.?]*$|(?:quem e voce|qual (?:e )?o seu nome|que (?:dia|horas?) (?:e|sao)|qual (?:e )?(?:a data de hoje|o horario agora))\b|quanto e\s+[\d\s+*/.,()%-]+\??$)/i;
 const basicDefinition = /\bo que (?:e|sao)\s+(?:(?:o|a|os|as|um|uma)\s+)?(?:memoria ram|memoria|ram|vram|cpu|gpu|processador)\b/i;
@@ -55,7 +56,7 @@ export function searchQueryFor(message, { systemQuestion = false, history = [] }
   if (explicit !== undefined) {
     return !localRequest.test(query) || explicitWeb.test(query) ? explicit || undefined : undefined;
   }
-  if (localRequest.test(query) || basicQuestion.test(query) || localWork.test(query)) return undefined;
+  if (localRequest.test(query) || localFileCommand.test(query) || basicQuestion.test(query) || localWork.test(query)) return undefined;
 
   if (followUp.test(query) && text.length <= 100) {
     const topic = previousWebTopic(history);

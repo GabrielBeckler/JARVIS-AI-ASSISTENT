@@ -1,7 +1,7 @@
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appendAssistantOnce, captureScrollPosition, createRequestContext, exportConversationMarkdown, getConversationDraft, isCurrentRequest, removeConversation, renameConversationTitle, restoreConversations, restoreScrollTop, setConversationDraft, updateConversationFlags, updateMessage, type StoredConversation } from "./chat.js";
 import { createLocalChatInstructions, isModelInstalled, limitChatContext, resolveChatThinking, toChatContext, type StoredMessage } from "./ollama.js";
-import { cancelOllamaChat, executeLocalTool, listOllamaModels, normalizeOllamaError, streamOllamaChat, type LocalAction, type LocalEntry } from "./ollamaService";
+import { cancelOllamaChat, executeLocalTool, listOllamaModels, normalizeOllamaError, streamOllamaChat, type LocalIntent, type LocalEntry } from "./ollamaService";
 import { localActionFor, localResultText } from "./localTools.js";
 import { ConversationDialog } from "./ConversationDialog";
 import { ConversationMenu } from "./ConversationMenu";
@@ -32,7 +32,7 @@ type ChatStoreStatus = "checking" | "ready" | "failed";
 type StreamState = { webSearch: boolean; localStatus?: string; requestId: string; content: string; model: string; createdAt: number; startedAt: number; firstContentMs: number | null };
 type CopyFeedback = { label: string; failed: boolean };
 type RenameDialogState = { conversationId: string; value: string };
-type LocalChoice = { action: LocalAction; query: string; entries: LocalEntry[] };
+type LocalChoice = { intent: LocalIntent; entries: LocalEntry[] };
 
 function durationLabel(milliseconds: number | null | undefined): string {
   return milliseconds == null || !Number.isFinite(milliseconds) ? "N/D" : `${(milliseconds / 1000).toFixed(1)} s`;
@@ -658,7 +658,18 @@ function App() {
 
     try {
       if (localIntent) {
-        const result = await executeLocalTool(localIntent.action, localIntent.query);
+        if (localIntent.clarification) {
+          if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
+          const doneAt = Date.now();
+          setConversations((items) => {
+            const sent = updateMessage(items, conversationId, userMessage.id!, { delivery: "sent" });
+            return appendAssistantOnce(sent, conversationId, requestId, { id: crypto.randomUUID(), role: "assistant", content: localIntent.clarification!, model: "ferramenta local", createdAt: doneAt, requestId, delivery: "sent" })
+              .map((item) => item.id === conversationId ? { ...item, updatedAt: doneAt } : item);
+          });
+          if (readAnswer) voice.stopReply(requestId);
+          return;
+        }
+        const result = await executeLocalTool(localIntent);
         if (!isCurrentRequest(activeRequestsRef.current, conversationId, requestId)) return;
         const assistantMessageId = crypto.randomUUID();
         const nowDone = Date.now();
@@ -669,7 +680,7 @@ function App() {
             createdAt: nowDone, requestId, delivery: "sent",
           }).map((item) => item.id === conversationId ? { ...item, updatedAt: nowDone } : item);
         });
-        if (result.status === "ambiguous") setLocalChoices((choices) => ({ ...choices, [assistantMessageId]: { action: localIntent.action, query: localIntent.query, entries: result.results } }));
+        if (result.status === "ambiguous") setLocalChoices((choices) => ({ ...choices, [assistantMessageId]: { intent: localIntent, entries: result.results } }));
         if (readAnswer) voice.stopReply(requestId);
         return;
       }
@@ -782,9 +793,9 @@ function App() {
     const startedAt = performance.now();
     setLocalChoices((items) => { const next = { ...items }; delete next[messageId]; return next; });
     setRequestState(conversation.id, requestId);
-    setStreamingByConversation((items) => ({ ...items, [conversation.id]: { webSearch: false, localStatus: choice.action === "open_project" ? "Abrindo projeto" : choice.action === "read_file" ? "Lendo arquivo" : "Listando arquivos", requestId, content: "", model: "ferramenta local", createdAt: now, startedAt, firstContentMs: null } }));
+    setStreamingByConversation((items) => ({ ...items, [conversation.id]: { webSearch: false, localStatus: choice.intent.action === "open_project" ? "Abrindo projeto" : choice.intent.action === "read_file" ? "Lendo arquivo" : choice.intent.action === "list_directory" ? "Listando arquivos" : "Procurando arquivos", requestId, content: "", model: "ferramenta local", createdAt: now, startedAt, firstContentMs: null } }));
     try {
-      const result = await executeLocalTool(choice.action, choice.query, selected.path);
+      const result = await executeLocalTool(choice.intent, selected.path);
       if (!isCurrentRequest(activeRequestsRef.current, conversation.id, requestId)) return;
       const doneAt = Date.now();
       setConversations((items) => appendAssistantOnce(items, conversation.id, requestId, {
